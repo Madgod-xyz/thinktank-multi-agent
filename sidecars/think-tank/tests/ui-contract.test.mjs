@@ -903,3 +903,49 @@ test('Deep tracking fix: /health cache in main.mjs, flash-free switchConversatio
   assert.equal(renderCalls, 0);
   assert.equal(refreshCalls, 0);
 });
+
+test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellipse clearance, userSpaceOnUse markers, and resize reactivity', () => {
+  assert.match(appCss, /#swarm-interaction-svg\s*\{[^}]*direction:\s*ltr;/, '#swarm-interaction-svg must enforce direction: ltr so RTL tier labels never clip');
+  assert.match(html, /id="graph-replay-seq"[^>]*dir="ltr"/, '#graph-replay-seq must enforce dir="ltr"');
+  assert.match(appJs, /markerUnits="userSpaceOnUse"/, 'Network arrow markers must use userSpaceOnUse');
+  assert.match(appJs, /window\.addEventListener\('resize'/, 'wireEvents must re-render map on window resize');
+
+  const netMatch = appJs.match(/function renderNetworkView\(events, cutoff\)\s*\{[\s\S]*?\n\s{2}\}/);
+  const roleDefaultsMatch = appJs.match(/const ROLE_DEFAULTS\s*=\s*\{[\s\S]*?\};/);
+  const glyphsMatch = appJs.match(/const ROLE_GLYPHS\s*=\s*\{[\s\S]*?\};/);
+  assert.ok(netMatch && roleDefaultsMatch && glyphsMatch, 'app.js must define ROLE_DEFAULTS, ROLE_GLYPHS, and renderNetworkView');
+
+  const fakeSvg = { attrs: {}, innerHTML: '', setAttribute(k, v) { this.attrs[k] = v; } };
+  const netSb = {
+    document: { documentElement: { dir: 'rtl' } },
+    $: (sel) => (sel === '#swarm-interaction-svg' ? fakeSvg : sel === '#network-graph-wrap' ? { clientWidth: 640 } : null),
+    esc: (v) => String(v ?? ''),
+    num: (v) => String(v),
+    tKey: (k) => k,
+    getRoleMeta: (id) => ({ monogram: id.slice(0, 2).toUpperCase(), frameShape: 'circle' }),
+    roleLabel: (id) => id,
+    roleBilingualLabel: (id) => id,
+    normalizeRoleId: (id) => id,
+    isRoleActiveInCase: () => true,
+    isWorkingAgentStatus: () => false,
+    requestTypeLabel: () => 'Peer sync',
+    requestCategoryMeta: () => ({ color: 'var(--cat-sync)', netMarker: 'net-cat-sync' }),
+    eventTone: () => ({ tone: 'muted', color: 'var(--ink-muted)' }),
+    state: { agents: [], inspectorItem: null, isClosed: false, language: 'fa' },
+  };
+  const sampleEvents = [
+    { seq: 1, from: 'backend-auditor', to: 'ui-frontend-designer', action: 'PEER_SYNC', summary: 'Sync contracts' },
+    { seq: 2, from: 'ui-frontend-designer', to: 'backend-auditor', action: 'PEER_SYNC', summary: 'Ack contracts' },
+    { seq: 3, from: 'council-critic', to: 'backend-auditor', action: 'RETURN_DEFECT', summary: 'Fix F-01' },
+  ];
+  vm.runInNewContext(`${roleDefaultsMatch[0]}\n${glyphsMatch[0]}\n${netMatch[0]}\nrenderNetworkView(${JSON.stringify(sampleEvents)}, 10);`, netSb);
+
+  assert.equal(fakeSvg.attrs.viewBox, '0 0 640 440');
+  const curves = [...fakeSvg.innerHTML.matchAll(/class="net-edge-stroke" d="M ([0-9.]+) ([0-9.]+) Q ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)"/g)];
+  assert.equal(curves.length, 3);
+  for (const [, sx, sy, cx, cy, ex, ey] of curves) {
+    assert.ok(Math.hypot(Number(ex) - Number(sx), Number(ey) - Number(sy)) > 40, 'Edge path endpoints must be separated clearly');
+    assert.ok(Number(cx) > 0 && Number(cy) > 0, 'Control point must stay inside positive viewport coordinates');
+  }
+  assert.match(fakeSvg.innerHTML, /style="direction:ltr;unicode-bidi:plaintext"/, 'Network SVG text must stabilize RTL anchoring');
+});

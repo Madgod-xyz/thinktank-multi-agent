@@ -1977,42 +1977,47 @@
     const svg = $('#swarm-interaction-svg');
     if (!svg) return;
     const containerW = Math.max(540, Math.min(860, $('#network-graph-wrap')?.clientWidth || 640));
-    const h = 410;
+    const h = 440;
     svg.setAttribute('viewBox', `0 0 ${containerW} ${h}`);
 
     const row1 = ['main_agent', 'team-manager', 'council-critic', 'code-reviewer'];
     const row2 = ['qa-reviewer'];
     const row3 = ['ui-frontend-designer', 'backend-auditor', 'ecommerce_seo_operator', 'wp_technical_operator'];
     const pos = {};
-    const sidePad = 62;
+    const sidePad = 68;
     const spanW = Math.max(240, containerW - sidePad * 2);
-    row1.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row1.length - 1)) * i, y: 56 }; });
-    row2.forEach((id) => { pos[id] = { x: Math.min(containerW - sidePad, Math.round(containerW * 0.78)), y: 205 }; });
-    row3.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row3.length - 1)) * i, y: 354 }; });
+    row1.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row1.length - 1)) * i, y: 76 }; });
+    row2.forEach((id) => { pos[id] = { x: Math.min(containerW - sidePad, Math.round(containerW * 0.72)), y: 222 }; });
+    row3.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row3.length - 1)) * i, y: 368 }; });
 
-    const defs = `<defs>
-      <marker id="net-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--open)"/></marker>
-      <marker id="net-working" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--working)"/></marker>
-      <marker id="net-review" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--review)"/></marker>
-      <marker id="net-verified" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--verified)"/></marker>
-      <marker id="net-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--ink-muted)"/></marker>
-      <marker id="net-cat-referral" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-referral)"/></marker>
-      <marker id="net-cat-inquiry" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-inquiry)"/></marker>
-      <marker id="net-cat-defect" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-defect)"/></marker>
-      <marker id="net-cat-rewrite" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-rewrite)"/></marker>
-      <marker id="net-cat-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-sync)"/></marker>
-      <marker id="net-cat-verify" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cat-verify)"/></marker>
-    </defs>`;
+    const markerPath = '<path d="M 1 1.5 L 10.5 6 L 1 10.5 L 3.4 6 z"';
+    const markerDefs = [
+      ['net-open', 'var(--open)'],
+      ['net-working', 'var(--working)'],
+      ['net-review', 'var(--review)'],
+      ['net-verified', 'var(--verified)'],
+      ['net-muted', 'var(--ink-muted)'],
+      ['net-cat-referral', 'var(--cat-referral)'],
+      ['net-cat-inquiry', 'var(--cat-inquiry)'],
+      ['net-cat-defect', 'var(--cat-defect)'],
+      ['net-cat-rewrite', 'var(--cat-rewrite)'],
+      ['net-cat-sync', 'var(--cat-sync)'],
+      ['net-cat-verify', 'var(--cat-verify)'],
+    ].map(([id, fill]) => (
+      `<marker id="${id}" viewBox="0 0 12 12" refX="9.2" refY="6" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse">${markerPath} fill="${fill}"/></marker>`
+    )).join('');
+    const defs = `<defs>${markerDefs}</defs>`;
 
     const isRtl = document.documentElement.dir === 'rtl';
-    const tierLabelX = isRtl ? containerW - 12 : 12;
+    const tierLabelX = isRtl ? containerW - 14 : 14;
     const tierAnchor = isRtl ? 'end' : 'start';
+    const rtlTextStyle = 'direction:ltr;unicode-bidi:plaintext';
     const tierBands = `<g class="net-tier-guides" aria-hidden="true">
-      <line x1="12" y1="130" x2="${containerW - 12}" y2="130" stroke="var(--rule)" stroke-dasharray="4 4" stroke-width="1"/>
-      <line x1="12" y1="280" x2="${containerW - 12}" y2="280" stroke="var(--rule)" stroke-dasharray="4 4" stroke-width="1"/>
-      <text x="${tierLabelX}" y="20" text-anchor="${tierAnchor}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.82">${esc(tKey('map.tier.supervisors'))}</text>
-      <text x="${tierLabelX}" y="148" text-anchor="${tierAnchor}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.82">${esc(tKey('map.tier.tester'))}</text>
-      <text x="${tierLabelX}" y="298" text-anchor="${tierAnchor}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.82">${esc(tKey('map.tier.workers'))}</text>
+      <line x1="14" y1="148" x2="${containerW - 14}" y2="148" stroke="var(--rule)" stroke-dasharray="4 4" stroke-width="1"/>
+      <line x1="14" y1="294" x2="${containerW - 14}" y2="294" stroke="var(--rule)" stroke-dasharray="4 4" stroke-width="1"/>
+      <text x="${tierLabelX}" y="22" text-anchor="${tierAnchor}" style="${rtlTextStyle}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.88">${esc(tKey('map.tier.supervisors'))}</text>
+      <text x="${tierLabelX}" y="166" text-anchor="${tierAnchor}" style="${rtlTextStyle}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.88">${esc(tKey('map.tier.tester'))}</text>
+      <text x="${tierLabelX}" y="312" text-anchor="${tierAnchor}" style="${rtlTextStyle}" fill="var(--ink-muted)" font-size="12" font-weight="600" opacity="0.88">${esc(tKey('map.tier.workers'))}</text>
     </g>`;
 
     const edgeTone = (edgeEvents) => {
@@ -2040,31 +2045,72 @@
       muted: 'var(--ink-muted)',
     };
 
+    const ellipseAnchor = (p, ux, uy) => {
+      const rx = 34;
+      // Extra bottom clearance so arrows leaving/entering from below clear node monogram text cleanly
+      const ry = uy > 0.52 ? 40 : 27;
+      const scale = 1 / (Math.hypot(ux / rx, uy / ry) || 1);
+      return { x: p.x + ux * scale, y: p.y + uy * scale };
+    };
+
     const edgePlans = edges.map((e, idx) => {
       const p1 = pos[e.from];
       const p2 = pos[e.to];
       const dx = p2.x - p1.x;
       const dy = p2.y - p1.y;
       const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
       const hasReverse = aggMap.has(`${e.to}->${e.from}`);
-      const bendDir = e.from < e.to ? 1 : -1;
-      const bendMag = (hasReverse ? 28 : 16) + (idx % 3) * 8;
-      const ox = (dx / len) * 30;
-      const oy = (dy / len) * 24;
-      const sx = p1.x + ox;
-      const sy = p1.y + oy;
-      const ex = p2.x - ox;
-      const ey = p2.y - oy;
-      const cx = (p1.x + p2.x) / 2 - (dy / len) * bendDir * bendMag;
-      const cy = (p1.y + p2.y) / 2 + (dx / len) * bendDir * bendMag;
-      const tPos = hasReverse ? (e.from < e.to ? 0.36 : 0.64) : (0.42 + ((idx % 3) * 0.08));
+      const isSameRow = Math.abs(dy) < 16;
+
+      let signedBend;
+      if (hasReverse) {
+        const mag = Math.max(36, Math.min(62, len * 0.22));
+        signedBend = (e.from < e.to ? 1 : -1) * mag;
+      } else if (isSameRow) {
+        // Quadratic apex reaches 0.5 * bend; scale >= 72 when spanning intermediate same-row nodes
+        const skipsNodes = Math.abs(dx) > spanW * 0.45;
+        const mag = skipsNodes ? Math.max(72, Math.min(86, len * 0.22)) : Math.max(46, Math.min(64, len * 0.25));
+        // Bend row-3 arcs cleanly upward away from monograms, row-1 arcs downward away from tier title
+        const wantUp = p1.y > 280;
+        const targetDy = wantUp ? -1 : 1;
+        signedBend = (ny >= 0 ? targetDy : -targetDy) * mag;
+      } else {
+        const mag = Math.max(24, Math.min(44, len * 0.13)) + (idx % 2) * 6;
+        signedBend = (idx % 2 === 0 ? 1 : -1) * mag;
+      }
+
+      const cx = (p1.x + p2.x) / 2 + nx * signedBend;
+      const cy = (p1.y + p2.y) / 2 + ny * signedBend;
+
+      const t1x = cx - p1.x;
+      const t1y = cy - p1.y;
+      const t1Len = Math.hypot(t1x, t1y) || 1;
+      const sPt = ellipseAnchor(p1, t1x / t1Len, t1y / t1Len);
+
+      const t2x = p2.x - cx;
+      const t2y = p2.y - cy;
+      const t2Len = Math.hypot(t2x, t2y) || 1;
+      const ePt = ellipseAnchor(p2, -t2x / t2Len, -t2y / t2Len);
+
+      const sx = sPt.x;
+      const sy = sPt.y;
+      const ex = ePt.x;
+      const ey = ePt.y;
+
+      const tPos = hasReverse ? (e.from < e.to ? 0.44 : 0.56) : 0.5;
       const mt = 1 - tPos;
-      const lx = mt * mt * sx + 2 * mt * tPos * cx + tPos * tPos * ex;
-      const ly = mt * mt * sy + 2 * mt * tPos * cy + tPos * tPos * ey - 4;
+      const bx = mt * mt * sx + 2 * mt * tPos * cx + tPos * tPos * ex;
+      const by = mt * mt * sy + 2 * mt * tPos * cy + tPos * tPos * ey;
+      const outSign = signedBend >= 0 ? 1 : -1;
+      const lx = bx + nx * outSign * 14;
+      const ly = by + ny * outSign * 14 + 4;
+
       const latest = e.events[e.events.length - 1];
       const reqLabel = requestTypeLabel(latest);
       const edgeText = e.count > 1 ? `×${e.count} ${reqLabel}` : reqLabel;
-      const labelW = Math.min(168, Math.max(52, edgeText.length * 6.8 + 16));
+      const labelW = Math.min(176, Math.max(56, edgeText.length * 7.0 + 18));
       return { e, sx, sy, cx, cy, ex, ey, lx, ly, labelW, labelH: 20, latest, edgeText };
     });
 
@@ -2073,17 +2119,17 @@
       let moved = false;
       for (let i = 0; i < edgePlans.length; i++) {
         const a = edgePlans[i];
-        // Repel from node boxes so labels never obscure SVG icons
+        // Repel from node boxes so labels never obscure SVG icons or monograms
         for (const np of nodePts) {
-          if (Math.abs(a.lx - np.x) < (a.labelW / 2 + 34) && Math.abs(a.ly - np.y) < 34) {
-            a.ly += (a.ly <= np.y ? -14 : 14);
+          if (Math.abs(a.lx - np.x) < (a.labelW / 2 + 36) && Math.abs(a.ly - np.y) < 38) {
+            a.ly += (a.ly <= np.y ? -15 : 15);
             moved = true;
           }
         }
         for (let j = i + 1; j < edgePlans.length; j++) {
           const b = edgePlans[j];
           const overlapX = (a.labelW / 2 + b.labelW / 2 + 6) - Math.abs(a.lx - b.lx);
-          const overlapY = ((a.labelH + b.labelH) / 2 + 2) - Math.abs(a.ly - b.ly);
+          const overlapY = ((a.labelH + b.labelH) / 2 + 3) - Math.abs(a.ly - b.ly);
           if (overlapX > 0 && overlapY > 0) {
             const pushY = (overlapY / 2 + 3) * (a.ly <= b.ly ? -1 : 1);
             a.ly += pushY;
@@ -2096,8 +2142,8 @@
             moved = true;
           }
         }
-        a.lx = Math.max(a.labelW / 2 + 8, Math.min(containerW - a.labelW / 2 - 8, a.lx));
-        a.ly = Math.max(18, Math.min(h - 14, a.ly));
+        a.lx = Math.max(a.labelW / 2 + 12, Math.min(containerW - a.labelW / 2 - 12, a.lx));
+        a.ly = Math.max(20, Math.min(h - 14, a.ly));
       }
       if (!moved) break;
     }
@@ -2108,19 +2154,19 @@
       const stroke = catMeta ? catMeta.color : (toneColor[eTone] || 'var(--ink-muted)');
       const marker = catMeta ? catMeta.netMarker : `net-${eTone}`;
       const isSelected = state.inspectorItem?.type === 'edge' && normalizeRoleId(state.inspectorItem.from) === e.from && normalizeRoleId(state.inspectorItem.to) === e.to;
-      const baseSw = Math.min(5, 1.5 + e.count * 0.6);
-      const sw = (isSelected ? Math.min(6.2, baseSw + 1.4) : baseSw).toFixed(1);
-      const flowSw = Math.max(1.6, Number(sw) * 0.72).toFixed(1);
+      const baseSw = Math.min(3.0, 1.5 + Math.log2(e.count + 1) * 0.55);
+      const sw = (isSelected ? Math.min(3.6, baseSw + 0.9) : baseSw).toFixed(1);
+      const flowSw = Math.max(1.2, Number(sw) * 0.65).toFixed(1);
       const tip = `${roleLabel(e.from)} -> ${roleLabel(e.to)}: ${edgeText}${latest?.summary ? ` — ${latest.summary}` : ''}`;
       const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
       return `<g class="net-edge-arrow${isSelected ? ' is-selected' : ''}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" tabindex="0" role="button" aria-label="${esc(tip)}">
         <title>${esc(tip)}</title>
-        <path d="${d}" fill="none" stroke="transparent" stroke-width="14"/>
-        <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="3.2" fill="${stroke}"/>
-        <path class="net-edge-stroke" d="${d}" fill="none" stroke="${stroke}" stroke-width="${sw}" marker-end="url(#${marker})"/>
-        <path class="net-edge-flow" d="${d}" fill="none" stroke="${stroke}" stroke-width="${flowSw}"/>
-        <rect class="net-label-pill" x="${(lx - labelW / 2).toFixed(1)}" y="${(ly - 14).toFixed(1)}" width="${labelW.toFixed(1)}" height="20" rx="10" fill="var(--sheet)" stroke="var(--rule)" stroke-width="1"/>
-        <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="600" paint-order="stroke" stroke="var(--paper)" stroke-width="3.5" stroke-linejoin="round">${esc(edgeText)}</text>
+        <path d="${d}" fill="none" stroke="transparent" stroke-width="16"/>
+        <path class="net-edge-stroke" d="${d}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" marker-end="url(#${marker})"/>
+        <path class="net-edge-flow" d="${d}" fill="none" stroke="${stroke}" stroke-width="${flowSw}" stroke-linecap="round"/>
+        <circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="2.8" fill="${stroke}" stroke="var(--paper)" stroke-width="1"/>
+        <rect class="net-label-pill" x="${(lx - labelW / 2).toFixed(1)}" y="${(ly - 14).toFixed(1)}" width="${labelW.toFixed(1)}" height="20" rx="10" fill="var(--sheet)" stroke="${stroke}" stroke-opacity="0.45" stroke-width="1"/>
+        <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" style="${rtlTextStyle}" fill="var(--ink)" font-size="12" font-weight="600" paint-order="stroke" stroke="var(--paper)" stroke-width="3.5" stroke-linejoin="round">${esc(edgeText)}</text>
       </g>`;
     }).join('');
 
@@ -2133,13 +2179,13 @@
       const glyph = ROLE_GLYPHS[id] || ROLE_GLYPHS.main_agent;
       let frameSvg = '';
       if (meta.frameShape === 'hexagon') {
-        frameSvg = '<polygon points="0,-21 26,-10 26,10 0,21 -26,10 -26,-10" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
+        frameSvg = '<polygon class="net-node-frame" points="0,-21 26,-10 26,10 0,21 -26,10 -26,-10" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
       } else if (meta.frameShape === 'square') {
-        frameSvg = '<rect x="-25" y="-18" width="50" height="36" rx="4" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
+        frameSvg = '<rect class="net-node-frame" x="-25" y="-18" width="50" height="36" rx="4" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
       } else if (meta.frameShape === 'diamond') {
-        frameSvg = '<polygon points="0,-22 30,0 0,22 -30,0" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
+        frameSvg = '<polygon class="net-node-frame" points="0,-22 30,0 0,22 -30,0" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
       } else {
-        frameSvg = '<ellipse cx="0" cy="0" rx="26" ry="19" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
+        frameSvg = '<ellipse class="net-node-frame" cx="0" cy="0" rx="26" ry="19" fill="var(--sheet)" stroke="var(--rule-strong)" stroke-width="1.6"/>';
       }
       const haloSvg = isWorkingNow
         ? '<ellipse class="net-node-halo" cx="0" cy="0" rx="32" ry="25" fill="none" stroke="var(--working)" stroke-width="1.6"/>'
@@ -2149,7 +2195,7 @@
         ${haloSvg}
         ${frameSvg}
         <g transform="translate(-10, -10)" fill="none" stroke="var(--ink)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${glyph}</g>
-        <text x="0" y="33" text-anchor="middle" fill="var(--ink-muted)" font-size="12" font-weight="700" font-family="ui-monospace, SFMono-Regular, monospace">${esc(meta.monogram)}</text>
+        <text x="0" y="33" text-anchor="middle" style="${rtlTextStyle}" fill="var(--ink-muted)" font-size="12" font-weight="700" font-family="ui-monospace, SFMono-Regular, monospace">${esc(meta.monogram)}</text>
       </g>`;
     }).join('');
 
@@ -2553,7 +2599,7 @@
           if (msg.generation) state.wsGeneration = msg.generation;
 
           if (msg.type === 'SYNC_READY') {
-            if (Number(msg.seq || 0) > state.lastSeenSeq || !state.hasSession) refreshStatus();
+            if (Number(msg.seq || 0) > state.lastSeenSeq) refreshStatus();
             return;
           }
           if (msg.type === 'SYNC_SNAPSHOT') {
@@ -3314,6 +3360,14 @@
         const btn = $('#raw-copy-btn');
         if (btn) btn.textContent = tKey('settings.rawCopied');
       } catch (_) {}
+    });
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (state.hasSession && state.activeTab === 'map') renderMap();
+      }, 120);
     });
   }
 

@@ -2788,18 +2788,10 @@ async def upsert_subtask(req: SubtaskUpsertRequest):
     priority_upper = (req.priority or "HIGH").upper().strip()
 
     assignee_name = req.assigneeName or req.assignee
-    try:
-        catalog_path = os.path.join(os.path.dirname(__file__), "role_catalog.json")
-        if os.path.exists(catalog_path):
-            with open(catalog_path, "r", encoding="utf-8") as cf:
-                cdata = json.load(cf)
-                croles = cdata if isinstance(cdata, list) else cdata.get("roles", [])
-                for cr in croles:
-                    if normalize_agent_id(cr.get("id", "")) == canon_assignee or normalize_agent_id(cr.get("agent_name", "")) == canon_assignee:
-                        assignee_name = req.assigneeName or cr.get("title") or cr.get("title_fa") or assignee_name
-                        break
-    except Exception:
-        pass
+    for cr in load_role_catalog():
+        if normalize_agent_id(cr.get("id", "")) == canon_assignee or normalize_agent_id(cr.get("agent_name", "")) == canon_assignee:
+            assignee_name = req.assigneeName or cr.get("title") or cr.get("title_fa") or assignee_name
+            break
 
     subtask_id = (req.id or "").strip()
     existing_idx = -1

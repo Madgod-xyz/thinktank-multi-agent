@@ -1281,17 +1281,28 @@ html[dir="rtl"] .dir-arrow .dir-arrow {
 }
 
 .net-edge-flow {
-  stroke-dasharray: 6 6;
-  opacity: 0.45;
+  stroke-dasharray: 4 7;
+  opacity: 0.55;
   pointer-events: none;
-  animation: netFlowDash 1.6s linear infinite;
+  animation: netFlowDash 1.5s linear infinite;
   transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 .net-edge-arrow:hover .net-edge-stroke,
 .net-edge-arrow:focus-visible .net-edge-stroke,
 .net-edge-arrow.is-selected .net-edge-stroke {
-  stroke-width: 3.6;
+  stroke-width: 3.4;
+}
+
+.net-edge-arrow:hover .net-label-pill,
+.net-edge-arrow:focus-visible .net-label-pill,
+.net-edge-arrow.is-selected .net-label-pill {
+  stroke-opacity: 0.9;
+}
+
+.net-node-group:hover .net-node-frame,
+.net-node-group:focus-visible .net-node-frame {
+  stroke: var(--ink);
 }
 
 .net-edge-arrow:hover .net-edge-flow,
@@ -1532,6 +1543,7 @@ html[dir="rtl"] .dir-arrow .dir-arrow {
   display: block;
   width: 100%;
   height: auto;
+  direction: ltr;
 }
 
 .graph-canvas-wrap {
