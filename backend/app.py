@@ -1064,6 +1064,20 @@ def normalize_conversation(cid: str, conv: Dict[str, Any]) -> bool:
 
     return changed
 
+def get_conv_sort_ts(c: Dict[str, Any]) -> float:
+    last_msg = c.get("messages", [])[-1].get("timestamp") if c.get("messages") else None
+    last_tool = c.get("telemetry", {}).get("toolCalls", [])[-1].get("timestamp") if c.get("telemetry", {}).get("toolCalls") else None
+    raw = c.get("updatedAt") or c.get("updated_at") or last_msg or last_tool or 0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            return 1000.0
+    return 0.0
+
+
 def load_persisted_state():
     global conversations_store, active_conv_id, subagent_session_map
     subagent_session_map = {}
@@ -1419,20 +1433,6 @@ def is_meaningful_conversation(cid: str, conv: Dict[str, Any], current_cid: str)
         or run_index > 1
         or "--run-" in cid
     )
-
-
-def get_conv_sort_ts(c: Dict[str, Any]) -> float:
-    last_msg = c.get("messages", [])[-1].get("timestamp") if c.get("messages") else None
-    last_tool = c.get("telemetry", {}).get("toolCalls", [])[-1].get("timestamp") if c.get("telemetry", {}).get("toolCalls") else None
-    raw = c.get("updatedAt") or c.get("updated_at") or last_msg or last_tool or 0
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            return 1000.0
-    return 0.0
 
 
 def _build_conv_row(cid: str, c: Dict[str, Any], target_cid: str) -> Dict[str, Any]:

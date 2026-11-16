@@ -1482,11 +1482,17 @@ class RemediationGatesTests(unittest.TestCase):
         self.assertTrue(backend_app.conversations_store[f"{ws_b_cid}--run-1"].get("isArchivedRun"))
         self.assertEqual(backend_app._resolve_workspace_conv_id(ws_b_uri), ws_b_cid)
 
-        # workspaceUri must be persisted to SQLite sync_store
+        # workspaceUri must be persisted to SQLite sync_store and restored on load_persisted_state()
         loaded_convs = backend_app.sync_store.load_conversations()
         self.assertEqual(
             backend_app._normalize_workspace_key(loaded_convs[ws_b_cid]["snapshot"].get("workspaceUri")),
             backend_app._normalize_workspace_key(ws_b_uri),
+        )
+        backend_app.sessions_by_workspace.clear()
+        backend_app.load_persisted_state()
+        self.assertEqual(
+            backend_app.sessions_by_workspace[backend_app._normalize_workspace_key(ws_b_uri)]["conversationId"],
+            ws_b_cid,
         )
 
         # WebSocket SYNC_SNAPSHOT includes hasSession, parentConvId, and conversationsList
