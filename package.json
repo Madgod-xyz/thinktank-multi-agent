@@ -1,0 +1,14 @@
+{
+  "name": "team-orchestration-director",
+  "version": "3.0.0",
+  "description": "ThinkTank v3.0 — Case Ledger 7+1 multi-agent engineering, red-team review, QA testing, and live interaction matrix plugin for Antigravity.",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test sidecars/think-tank/tests/ui-contract.test.mjs sidecars/think-tank/tests/ui_activity.test.cjs sidecars/think-tank/tests/ui_i18n.test.cjs",
+    "verify": "python tools/verify_release.py",
+    "install:check": "python tools/install_plugin.py --check",
+    "sidecar": "node sidecars/think-tank/main.mjs"
+  }
+}

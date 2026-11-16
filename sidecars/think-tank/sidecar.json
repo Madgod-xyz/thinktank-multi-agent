@@ -1,0 +1,18 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Think Tank",
+  "description": "Live Case Ledger sidecar for multi-agent orchestration, WBS file locks, defect tracking, and QA verification",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Think Tank",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Think Tank"
+      }
+    ]
+  }
+}

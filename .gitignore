@@ -1,0 +1,14 @@
+# ThinkTank Portable Plugin .gitignore
+agents/_archived/
+**/__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+think_tank_live_state.json
+active_antigravity_session.json
+node_modules/
+.DS_Store
+Thumbs.db

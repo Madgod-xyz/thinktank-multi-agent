@@ -1,0 +1,2 @@
+description = "Start an isolated ThinkTank 7+1 multi-agent Case Ledger session (/ThinkTank)"
+prompt = "Activate the thinktank skill (skills/thinktank/SKILL.md) and start a new isolated ThinkTank v3 run (--new-run) for the requested task: {{args}}. Spawn real subagents from the 7+1 team, surface the live sidecar link sidecar://team-orchestration-director/think-tank/, and follow the 5-stage closed-loop protocol."
