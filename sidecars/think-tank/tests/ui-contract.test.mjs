@@ -753,3 +753,153 @@ test('Cross-tab live sync: continuous host-context watch, parent-resolved snapsh
   assert.equal(wsSb.state.project, 'Live WS Case');
   assert.equal(wsSb.state.conversations.length, 1);
 });
+
+test('Deep tracking fix: /health cache in main.mjs, flash-free switchConversation, active-case protection in syncHostContextOnly, and silent TELEMETRY_UPDATE', async () => {
+  // 1. main.mjs backendHealthy() uses /health and caches within HEALTH_CACHE_TTL_MS
+  const bhMatch = mainMjs.match(/async function backendHealthy\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(bhMatch, 'main.mjs must define backendHealthy()');
+  assert.match(bhMatch[0], /\/health/, 'backendHealthy must probe lightweight /health');
+  let fetchCalls = 0;
+  const bhSb = {
+    API: 'http://127.0.0.1:8780/api',
+    HEALTH_CACHE_TTL_MS: 4000,
+    lastBackendHealthyAt: 0,
+    AbortSignal: { timeout: () => undefined },
+    fetch: async (url) => {
+      fetchCalls += 1;
+      assert.equal(url, 'http://127.0.0.1:8780/api/health');
+      return { ok: true, status: 200, json: async () => ({ ok: true, syncMode: 'durable-websocket' }) };
+    },
+  };
+  await vm.runInNewContext(`${bhMatch[0]}\n(async () => {\n  this.__h1 = await backendHealthy();\n  this.__h2 = await backendHealthy();\n})();`, bhSb);
+  assert.equal(bhSb.__h1, true);
+  assert.equal(bhSb.__h2, true);
+  assert.equal(fetchCalls, 1);
+
+  // 2. switchConversation() does NOT wipe state.hasSession (zero empty-screen flash) until snapshot resolves
+  const swMatch = appJs.match(/async function switchConversation\([\s\S]*?\n\s{2}\}/);
+  assert.ok(swMatch, 'app.js must define switchConversation()');
+  let sawHasSessionDuringFetch = null;
+  let resetCalls = 0;
+  let appliedSnap = null;
+  class StubWs { close() {} }
+  const swSb = {
+    switchRequestSeq: 0,
+    state: {
+      activeConvId: 'conv-1',
+      userPinnedConv: false,
+      pinnedConvId: null,
+      hasSession: true,
+      ws: new StubWs(),
+    },
+    fetchStatusForConv: async (cid) => {
+      sawHasSessionDuringFetch = swSb.state.hasSession;
+      return { convId: cid, hasSession: true, thinkTank: { project: 'Next Case', status: 'ACTIVE' } };
+    },
+    resetConversationViewState: () => {
+      resetCalls += 1;
+      swSb.state.hasSession = false;
+    },
+    applySnapshot: (data, cid) => {
+      appliedSnap = { data, cid };
+      swSb.state.hasSession = Boolean(data.hasSession);
+    },
+    renderAll: () => {},
+    refreshStatus: async () => {},
+    connectWebSocket: () => {},
+    toast: () => {},
+  };
+  await vm.runInNewContext(`${swMatch[0]}\nswitchConversation('conv-2', true);`, swSb);
+  assert.equal(sawHasSessionDuringFetch, true);
+  assert.equal(resetCalls, 1);
+  assert.equal(appliedSnap?.cid, 'conv-2');
+  assert.equal(swSb.state.hasSession, true);
+
+  // Parent-resolved switchConversation() still calls connectWebSocket() when applySnapshot changes activeConvId
+  let wsConnectCount = 0;
+  swSb.state.activeConvId = 'conv-1';
+  swSb.state.lastSeenSeq = 42;
+  swSb.fetchStatusForConv = async () => ({ convId: 'parent-resolved-9', parentConvId: 'parent-resolved-9', hasSession: true, thinkTank: {} });
+  swSb.applySnapshot = (data) => {
+    swSb.state.activeConvId = data.convId;
+    swSb.state.hasSession = true;
+    swSb.state.lastSeenSeq = 1;
+  };
+  swSb.connectWebSocket = () => { wsConnectCount += 1; };
+  await vm.runInNewContext(`${swMatch[0]}\nswitchConversation('child-req-9', false);`, swSb);
+  assert.equal(swSb.state.activeConvId, 'parent-resolved-9');
+  assert.equal(wsConnectCount, 1);
+
+  // Non-403 fetch failure resets lastSeenSeq before calling refreshStatus() fallback
+  let resetBeforeRefresh = false;
+  swSb.fetchStatusForConv = async () => { throw new Error('network error'); };
+  swSb.refreshStatus = async () => {
+    resetBeforeRefresh = swSb.state.hasSession === false;
+  };
+  await vm.runInNewContext(`${swMatch[0]}\nswitchConversation('conv-3', true);`, swSb);
+  assert.equal(resetBeforeRefresh, true);
+
+  // 3. syncHostContextOnly() does NOT yank open active session when background tab hasSession=false
+  const syncMatch = appJs.match(/async function syncHostContextOnly\([\s\S]*?\n\s{2}\}/);
+  assert.ok(syncMatch, 'app.js must define syncHostContextOnly()');
+  const switchedTo = [];
+  const syncSb = {
+    hostSyncInFlight: null,
+    state: {
+      activeConvId: 'tt-open-1',
+      hostConvId: 'tt-open-1',
+      userPinnedConv: false,
+      hasSession: true,
+      isClosed: false,
+    },
+    nextCtx: { conversationId: 'plain-bg-2', workspaceMatched: true, hasSession: false },
+    getHostContextPath: () => '/api/host/context',
+    apiGet: async () => syncSb.nextCtx,
+    resolveHostConvId: (ctx) => ctx?.conversationId || '',
+    switchConversation: async (cid) => { switchedTo.push(cid); syncSb.state.activeConvId = cid; },
+    refreshStatus: async () => {},
+    resetConversationViewState: () => {},
+    renderAll: () => {},
+    toast: () => {},
+  };
+  await vm.runInNewContext(`${syncMatch[0]}\nsyncHostContextOnly(false);`, syncSb);
+  assert.deepEqual(switchedTo, []);
+  syncSb.nextCtx = { conversationId: 'tt-new-3', workspaceMatched: true, hasSession: true };
+  await vm.runInNewContext(`${syncMatch[0]}\nsyncHostContextOnly(false);`, syncSb);
+  assert.deepEqual(switchedTo, ['tt-new-3']);
+
+  // 4. TELEMETRY_UPDATE arrives without triggering renderAll() or refreshStatus()
+  const wsFnMatch = appJs.match(/function connectWebSocket\(\)\s*\{[\s\S]*?\n\s{2}\}/);
+  assert.ok(wsFnMatch, 'app.js must define connectWebSocket()');
+  let capWs = null;
+  let renderCalls = 0;
+  let refreshCalls = 0;
+  class TelemetryWs {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    constructor() { this.readyState = 1; capWs = this; }
+    close() {}
+  }
+  const telWsSb = {
+    WebSocket: TelemetryWs,
+    URLSearchParams,
+    clearTimeout: () => {},
+    setTimeout: () => 0,
+    startFallbackPoll: () => {},
+    stopFallbackPoll: () => {},
+    renderHeaderAndVisibility: () => {},
+    renderAll: () => { renderCalls += 1; },
+    refreshStatus: () => { refreshCalls += 1; },
+    applySnapshot: () => {},
+    applyIncrementalWsMsg: (m) => {
+      if (m.telemetryEntry) telWsSb.state.telemetry.toolCalls.unshift(m.telemetryEntry);
+      return false;
+    },
+    state: { activeConvId: 'tt-open-1', userPinnedConv: false, hasSession: true, lastSeenSeq: 5, ws: null, telemetry: { toolCalls: [] } },
+  };
+  vm.runInNewContext(`${wsFnMatch[0]}\nconnectWebSocket();`, telWsSb);
+  capWs.onmessage({ data: JSON.stringify({ type: 'TELEMETRY_UPDATE', convId: 'tt-open-1', telemetryEntry: { id: 'e1', tool: 'read_file' } }) });
+  assert.equal(telWsSb.state.telemetry.toolCalls.length, 1);
+  assert.equal(renderCalls, 0);
+  assert.equal(refreshCalls, 0);
+});

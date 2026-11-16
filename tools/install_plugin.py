@@ -252,6 +252,29 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
     except (ImportError, OSError, ValueError) as exc:
         hooks_error = str(exc)
 
+    db_compacted = None
+    sync_db = target_dir / "think_tank_sync.sqlite3"
+    wal_db = Path(f"{sync_db}-wal")
+    total_db_bytes = (sync_db.stat().st_size if sync_db.is_file() else 0) + (wal_db.stat().st_size if wal_db.is_file() else 0)
+    if sync_db.is_file() and total_db_bytes > 20 * 1024 * 1024:
+        live_up, _ = check_backend_health("127.0.0.1", 8780, timeout=0.5)
+        if live_up:
+            db_compacted = {"skipped": "backend_running"}
+        else:
+            try:
+                backend_dir_str = str((plugin_root / "backend").resolve())
+                if backend_dir_str not in sys.path:
+                    sys.path.insert(0, backend_dir_str)
+                from sync_store import SyncEventStore
+
+                store = SyncEventStore(str(sync_db))
+                try:
+                    db_compacted = store.prune_bloat(telemetry_keep=20, vacuum=True)
+                finally:
+                    store.close()
+            except Exception as exc:
+                db_compacted = {"error": str(exc)}
+
     result = {
         "targetDir": str(target_dir),
         "pluginInstallPath": str(plugin_dest),
@@ -264,6 +287,8 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
         "hooksInstalled": hooks_installed,
         "hooksConfigPath": str(hooks_config),
     }
+    if db_compacted is not None:
+        result["dbCompacted"] = db_compacted
     if hooks_error:
         result["hooksError"] = hooks_error
     return result

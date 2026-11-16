@@ -17,6 +17,8 @@ const GLOBAL_BACKEND_DIR = join(
 const BACKEND_DIR = process.env.THINKTANK_BACKEND_DIR
   || (existsSync(join(PLUGIN_BACKEND_DIR, 'app.py')) ? PLUGIN_BACKEND_DIR : GLOBAL_BACKEND_DIR);
 let backendStartup = null;
+let lastBackendHealthyAt = 0;
+const HEALTH_CACHE_TTL_MS = 4000;
 
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
@@ -236,17 +238,25 @@ async function forward(path, method, data) {
       error: body.detail || body.error || `Backend returned HTTP ${response.status}`,
     };
   } catch (error) {
+    lastBackendHealthyAt = 0;
     return { status: 'offline', syncMode: 'disconnected', error: error.message };
   }
 }
 
 async function backendHealthy() {
+  if (Date.now() - lastBackendHealthyAt < HEALTH_CACHE_TTL_MS) return true;
   try {
-    const response = await fetch(`${API}/status`, { signal: AbortSignal.timeout(700) });
+    let response = await fetch(`${API}/health`, { signal: AbortSignal.timeout(900) });
+    if (response.status === 404) {
+      response = await fetch(`${API}/status`, { signal: AbortSignal.timeout(1200) });
+    }
     if (!response.ok) return false;
-    const body = await response.json();
-    return body.syncMode === 'durable-websocket' && Boolean(body.sync?.generation);
+    const body = await response.json().catch(() => ({}));
+    const healthy = body.syncMode === 'durable-websocket' && (Boolean(body.ok) || Boolean(body.sync?.generation));
+    if (healthy) lastBackendHealthyAt = Date.now();
+    return healthy;
   } catch {
+    lastBackendHealthyAt = 0;
     return false;
   }
 }

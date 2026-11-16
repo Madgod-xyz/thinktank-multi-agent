@@ -514,21 +514,39 @@
     invalidateSignatures();
   }
 
+  let switchRequestSeq = 0;
   async function switchConversation(newCid, pinnedByUser = false) {
     const clean = (newCid || '').trim();
     if (!clean || clean === state.activeConvId) return;
+    const reqSeq = ++switchRequestSeq;
     state.activeConvId = clean;
     state.userPinnedConv = pinnedByUser;
     state.pinnedConvId = pinnedByUser ? clean : null;
-    resetConversationViewState();
-    renderAll();
     if (state.ws) {
       const prevWs = state.ws;
       state.ws = null;
       try { prevWs.close(); } catch (_) {}
     }
-    await refreshStatus();
-    connectWebSocket();
+    try {
+      const data = await fetchStatusForConv(clean);
+      if (reqSeq !== switchRequestSeq || state.activeConvId !== clean) return;
+      resetConversationViewState();
+      applySnapshot(data, clean);
+    } catch (err) {
+      if (reqSeq !== switchRequestSeq) return;
+      if (err && Number(err.status) === 403) {
+        state.userPinnedConv = false;
+        state.pinnedConvId = null;
+        state.activeConvId = state.hostConvId && state.hostConvId !== clean ? state.hostConvId : '';
+        resetConversationViewState();
+        renderAll();
+        if (err.message) toast(err.message);
+      } else {
+        resetConversationViewState();
+        await refreshStatus();
+      }
+    }
+    if (reqSeq === switchRequestSeq && state.activeConvId) connectWebSocket();
   }
 
   function applyTheme(theme) {
@@ -2359,9 +2377,12 @@
         if (liveHostCid) {
           const changed = liveHostCid !== state.hostConvId;
           state.hostConvId = liveHostCid;
+          const holdOpenActiveCase = Boolean(state.hasSession && !state.isClosed && state.activeConvId && state.activeConvId !== 'default');
           if (!state.userPinnedConv && liveHostCid !== state.activeConvId) {
-            await switchConversation(liveHostCid, false);
-            return true;
+            if (!holdOpenActiveCase || ctx?.hasSession === true) {
+              await switchConversation(liveHostCid, false);
+              return true;
+            }
           }
           if ((changed || ctx?.hasSession) && !state.hasSession && liveHostCid === state.activeConvId) {
             await refreshStatus();
@@ -2465,7 +2486,21 @@
     if (Array.isArray(msg.subtasks)) { touched = true; state.subtasks = msg.subtasks; }
     if (msg.originCounts && typeof msg.originCounts === 'object') { touched = true; state.originCounts = msg.originCounts; }
     if (msg.roleUsage && typeof msg.roleUsage === 'object') { touched = true; state.roleUsage = msg.roleUsage; }
-    if (msg.telemetry && typeof msg.telemetry === 'object') { touched = true; state.telemetry = msg.telemetry; }
+    if (msg.telemetryEntry && typeof msg.telemetryEntry === 'object') {
+      const calls = Array.isArray(state.telemetry?.toolCalls) ? state.telemetry.toolCalls : [];
+      state.telemetry = { ...(state.telemetry || {}), toolCalls: [msg.telemetryEntry, ...calls.filter((c) => c?.id !== msg.telemetryEntry.id)].slice(0, 25) };
+    }
+    if (msg.terminalLog && typeof msg.terminalLog === 'object') {
+      const logs = Array.isArray(state.telemetry?.terminalLogs) ? state.telemetry.terminalLogs : [];
+      state.telemetry = { ...(state.telemetry || {}), terminalLogs: [msg.terminalLog, ...logs.filter((l) => l?.id !== msg.terminalLog.id)].slice(0, 25) };
+    }
+    if (msg.backgroundTask && typeof msg.backgroundTask === 'object') {
+      const tasks = Array.isArray(state.telemetry?.backgroundTasks) ? state.telemetry.backgroundTasks : [];
+      const idxT = tasks.findIndex((t) => t?.id === msg.backgroundTask.id);
+      const nextTasks = idxT >= 0 ? tasks.map((t, i) => (i === idxT ? msg.backgroundTask : t)) : [msg.backgroundTask, ...tasks];
+      state.telemetry = { ...(state.telemetry || {}), backgroundTasks: nextTasks };
+    }
+    if (msg.telemetry && typeof msg.telemetry === 'object') state.telemetry = msg.telemetry;
     if ('proposal' in msg) { touched = true; state.proposal = msg.proposal; }
     if ('review' in msg) { touched = true; state.review = msg.review; }
     if ('closureReceipt' in msg) { touched = true; state.closureReceipt = msg.closureReceipt; }
@@ -2560,6 +2595,11 @@
             return;
           }
           if (incomingSeq > state.lastSeenSeq) state.lastSeenSeq = incomingSeq;
+
+          if (msg.type === 'TELEMETRY_UPDATE') {
+            applyIncrementalWsMsg(msg);
+            return;
+          }
 
           if (msg.type === 'SNAPSHOT') {
             applySnapshot(msg, requestedWsCid);
@@ -3282,32 +3322,37 @@
     applyLang(state.language);
     wireEvents();
 
-    try {
-      const rolesData = await apiGet('/api/roles');
-      if (Array.isArray(rolesData.roles)) state.roles = rolesData.roles;
-      else if (Array.isArray(rolesData)) state.roles = rolesData;
-    } catch (_) {}
+    const rolesPromise = apiGet('/api/roles')
+      .then((rolesData) => {
+        if (Array.isArray(rolesData?.roles)) state.roles = rolesData.roles;
+        else if (Array.isArray(rolesData)) state.roles = rolesData;
+      })
+      .catch(() => {});
 
-    try {
-      if (window.sidecar?.getWorkspaceUris) {
-        const uris = await Promise.race([
-          window.sidecar.getWorkspaceUris(),
-          new Promise((resolve) => setTimeout(() => resolve([]), 350)),
-        ]);
-        if (Array.isArray(uris) && typeof uris[0] === 'string') {
-          state.workspaceUri = uris[0].trim();
-        }
-      }
-      if (window.sidecar?.onWorkspaceChange) {
-        window.sidecar.onWorkspaceChange((uris) => {
-          const nextUri = Array.isArray(uris) && typeof uris[0] === 'string' ? uris[0].trim() : '';
-          if (nextUri !== state.workspaceUri) {
-            state.workspaceUri = nextUri;
-            if (!state.userPinnedConv) syncHostContextOnly(false);
+    const wsPromise = (async () => {
+      try {
+        if (window.sidecar?.getWorkspaceUris) {
+          const uris = await Promise.race([
+            window.sidecar.getWorkspaceUris(),
+            new Promise((resolve) => setTimeout(() => resolve([]), 200)),
+          ]);
+          if (Array.isArray(uris) && typeof uris[0] === 'string') {
+            state.workspaceUri = uris[0].trim();
           }
-        });
-      }
-    } catch (_) {}
+        }
+        if (window.sidecar?.onWorkspaceChange) {
+          window.sidecar.onWorkspaceChange((uris) => {
+            const nextUri = Array.isArray(uris) && typeof uris[0] === 'string' ? uris[0].trim() : '';
+            if (nextUri !== state.workspaceUri) {
+              state.workspaceUri = nextUri;
+              if (!state.userPinnedConv) syncHostContextOnly(false);
+            }
+          });
+        }
+      } catch (_) {}
+    })();
+
+    await Promise.allSettled([rolesPromise, wsPromise]);
 
     let ctx = null;
     try {
@@ -3319,9 +3364,9 @@
       state.activeConvId = initialHostCid;
     }
 
-    await refreshStatus();
     connectWebSocket();
     startHostContextWatch();
+    await refreshStatus();
   }
 
   init();

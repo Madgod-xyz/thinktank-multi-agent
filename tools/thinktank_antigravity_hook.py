@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 import urllib.error
@@ -272,7 +273,7 @@ def _post_active_session(data: dict[str, Any], event_key: str) -> None:
             bridge_transport.api_post_fast(
                 "host/active-session",
                 data,
-                event_id=f"active-sess-{event_key}",
+                event_id=f"active-sess-{uuid.uuid4().hex[:12]}-{event_key[:24]}",
                 timeout=0.25,
             )
             return
@@ -344,11 +345,19 @@ def _extract_workspace_uri(payload: dict[str, Any], conv_id: str | None = None) 
 
 
 def _update_workspace_session_map(
-    existing: dict[str, Any], norm_ws: str | None, conv_id: str, project_id: Any
+    existing: dict[str, Any],
+    norm_ws: str | None,
+    conv_id: str,
+    project_id: Any,
+    event_source: str = "pre-invocation",
 ) -> dict[str, Any]:
     raw_map = existing.get("sessionsByWorkspace")
     ws_map = {str(k): dict(v) for k, v in raw_map.items() if isinstance(v, dict)} if isinstance(raw_map, dict) else {}
     if norm_ws:
+        curr = ws_map.get(norm_ws)
+        curr_cid = str(curr.get("conversationId") or "").strip() if isinstance(curr, dict) else ""
+        if event_source == "post-tool-use" and curr_cid and curr_cid != conv_id:
+            return ws_map
         ws_map[norm_ws] = {
             "conversationId": conv_id,
             "projectId": project_id,
@@ -408,8 +417,8 @@ def _valid_project_id(raw: Any) -> str | None:
     return val
 
 
-def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None:
-    """Record the active Antigravity session without letting child subagents overwrite it."""
+def record_active_session(conversation_id: str, payload: dict[str, Any], event_source: str = "pre-invocation") -> None:
+    """Record the active Antigravity session without letting child subagents or background tabs hijack it."""
     if not conversation_id:
         return
     project_id = _valid_project_id(payload.get("projectId"))
@@ -423,7 +432,7 @@ def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None
             existing = _read_json_dict(session_file)
             existing_cid = _valid_conv_id(existing.get("conversationId"))
             eff_pid = project_id or _valid_project_id(existing.get("projectId"))
-            ws_map = _update_workspace_session_map(existing, norm_ws, parent_cid, eff_pid)
+            ws_map = _update_workspace_session_map(existing, norm_ws, parent_cid, eff_pid, event_source=event_source)
             if not existing_cid or existing_cid == conversation_id or existing_cid in links or norm_ws:
                 next_data = dict(existing)
                 if not existing_cid or existing_cid == conversation_id or existing_cid in links:
@@ -445,6 +454,7 @@ def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None
                 "roleTitle": role_title,
                 "projectId": project_id,
                 "workspaceUri": norm_ws,
+                "eventSource": event_source,
                 "timestamp": time.time(),
             },
             f"{conversation_id}-{parent_cid}",
@@ -453,16 +463,33 @@ def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None
 
     with _session_file_lock(session_file):
         existing = _read_json_dict(session_file)
-        ws_map = _update_workspace_session_map(existing, norm_ws, conversation_id, project_id)
-        data = {
+        existing_cid = _valid_conv_id(existing.get("conversationId"))
+        ws_map = _update_workspace_session_map(existing, norm_ws, conversation_id, project_id, event_source=event_source)
+        curr_ws_cid = str((ws_map.get(norm_ws) or {}).get("conversationId") or "").strip() if norm_ws else ""
+        if event_source == "post-tool-use" and existing_cid and (existing_cid != conversation_id or (curr_ws_cid and curr_ws_cid != conversation_id)):
+            if ws_map != existing.get("sessionsByWorkspace"):
+                next_data = dict(existing)
+                next_data["sessionsByWorkspace"] = ws_map
+                _write_json_atomic(session_file, next_data)
+        else:
+            data = {
+                "conversationId": conversation_id,
+                "projectId": project_id,
+                "workspaceUri": norm_ws,
+                "timestamp": time.time(),
+                "sessionsByWorkspace": ws_map,
+            }
+            _write_json_atomic(session_file, data)
+    _post_active_session(
+        {
             "conversationId": conversation_id,
             "projectId": project_id,
             "workspaceUri": norm_ws,
+            "eventSource": event_source,
             "timestamp": time.time(),
-            "sessionsByWorkspace": ws_map,
-        }
-        _write_json_atomic(session_file, data)
-    _post_active_session(data, conversation_id)
+        },
+        f"{conversation_id}-{event_source}",
+    )
 
 
 def build_tool_event(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -484,15 +511,24 @@ def build_tool_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     tool_output = payload.get("output") or payload.get("result")
     agent_id = payload.get("agentId") or payload.get("senderCode") or "antigravity"
     agent_name = payload.get("agentName") or payload.get("senderName") or "Antigravity"
+    compact_args: dict[str, Any] = {}
+    if isinstance(tool_args, dict):
+        for idx, (k, v) in enumerate(tool_args.items()):
+            if idx >= 8:
+                break
+            if isinstance(v, str) and len(v) > 200:
+                compact_args[k] = v[:200]
+            else:
+                compact_args[k] = v
     event: dict[str, Any] = {
         "convId": conversation_id,
         "id": f"antigravity-tool-{conversation_id}-{step}",
         "tool": name,
         "status": "ERROR" if isinstance(error, str) and error else "SUCCESS",
         "stepIdx": step,
-        "args": tool_args if isinstance(tool_args, dict) else {},
-        "output": str(tool_output)[:1000] if tool_output else "",
-        "error": str(error)[:500] if error else "",
+        "args": compact_args,
+        "output": str(tool_output)[:300] if tool_output else "",
+        "error": str(error)[:300] if error else "",
         "agentId": agent_id,
         "agentName": agent_name,
     }
@@ -577,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
     if event_name == "post-tool-use":
         conversation_id = _conversation_id(payload)
         if conversation_id:
-            record_active_session(conversation_id, payload)
+            record_active_session(conversation_id, payload, event_source="post-tool-use")
         event = build_tool_event(payload)
         if event:
             send_tool_event(event)

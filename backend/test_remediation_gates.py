@@ -1548,6 +1548,223 @@ class RemediationGatesTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--id", proc.stdout)
 
+    def test_deep_tracking_sync_latency_and_non_hijack(self) -> None:
+        # 1. Lightweight /api/health endpoint
+        for ep in ("/api/health", "/health"):
+            res = self.client.get(ep)
+            self.assertEqual(res.status_code, 200)
+            body = res.json()
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["syncMode"], "durable-websocket")
+
+        # 2. Same-workspace active ThinkTank case must NOT be hijacked by background plain tab or post-tool-use
+        ws_uri = "file:///c:/workspaces/shared-ws"
+        tt_cid = "11111111-aaaa-2222-3333-444444444444"
+        plain_cid = "22222222-bbbb-3333-4444-555555555555"
+
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                json={"convId": tt_cid, "project": "Shared WS Case", "directive": "Keep pinned", "status": "ACTIVE", "progress": 30},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                json={"conversationId": tt_cid, "workspaceUri": ws_uri, "eventSource": "pre-invocation"},
+            ).status_code,
+            200,
+        )
+        seq_before = backend_app.sync_store.cursor(tt_cid)["seq"]
+
+        # WebSocket connect with projectId & repeated host/active-session must NOT create seq gaps
+        with self.client.websocket_connect(f"/ws?convId={tt_cid}&projectId=proj-shared") as _:
+            pass
+        self.assertEqual(backend_app.sync_store.cursor(tt_cid)["seq"], seq_before)
+
+        # High-volume host_tool on active ThinkTank conv compacts output/args and does not add SQLite TELEMETRY_UPDATE bloat rows
+        for step_idx in range(30):
+            r_tool = self.client.post(
+                "/api/telemetry/host_tool",
+                json={
+                    "id": f"bulk-{step_idx}",
+                    "convId": tt_cid,
+                    "tool": "read_file",
+                    "status": "SUCCESS",
+                    "stepIdx": step_idx,
+                    "args": {"Prompt": "x" * 600, "Path": "backend/app.py"},
+                    "output": "y" * 800,
+                },
+            )
+            self.assertEqual(r_tool.status_code, 200)
+        tel_after = self.client.get("/api/telemetry", params={"convId": tt_cid}).json()
+        self.assertEqual(len(tel_after["toolCalls"]), 25)
+        self.assertLessEqual(len(tel_after["toolCalls"][0]["output"]), 240)
+        self.assertLessEqual(len(tel_after["toolCalls"][0]["args"]["Prompt"]), 160)
+        self.assertEqual(backend_app.sync_store.cursor(tt_cid)["seq"], seq_before)
+
+        # Next durable chat events advance seq contiguously over live WebSocket without gaps
+        with self.client.websocket_connect(f"/ws?convId={tt_cid}&projectId=proj-shared") as ws_live:
+            _ = ws_live.receive_json()  # SYNC_READY
+            _ = ws_live.receive_json()  # SYNC_SNAPSHOT
+            r_chat = self.client.post(
+                "/api/chat/send",
+                json={"convId": tt_cid, "channel": "MAIN", "senderCode": "TM", "senderName": "Manager", "senderRole": "team-manager", "content": "Contiguous seq"},
+            )
+            self.assertEqual(r_chat.status_code, 200)
+            ev1 = ws_live.receive_json()
+            ev2 = ws_live.receive_json()
+            self.assertEqual([ev1["seq"], ev2["seq"]], [seq_before + 1, seq_before + 2])
+            self.assertEqual(backend_app.sync_store.cursor(tt_cid)["seq"], seq_before + 2)
+
+        # Background non-ThinkTank tab in same workspace sending host_tool + active-session cannot steal host/context
+        self.assertEqual(
+            self.client.post(
+                "/api/telemetry/host_tool",
+                json={"id": "plain-1", "convId": plain_cid, "tool": "run_command", "status": "SUCCESS", "stepIdx": 0, "args": {}, "output": "ok"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                json={"conversationId": plain_cid, "workspaceUri": ws_uri, "eventSource": "post-tool-use"},
+            ).status_code,
+            200,
+        )
+        self.assertFalse(backend_app.has_thinktank_activity(backend_app.conversations_store[plain_cid]))
+        ctx = self.client.get("/api/host/context", params={"workspaceUri": ws_uri}).json()
+        self.assertEqual(ctx["conversationId"], tt_cid)
+        self.assertTrue(ctx["hasSession"])
+
+        # Hook post-tool-use preserves existing workspace session owner and trims oversized args/output
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sess_file = tmp / "active_antigravity_session.json"
+            with patch.dict(
+                os.environ,
+                {"THINKTANK_SESSION_FILE": str(sess_file), "THINKTANK_ANTIGRAVITY_BRAIN_DIR": str(tmp / "brain")},
+            ), patch.object(hook_bridge, "_post_active_session"):
+                hook_bridge.record_active_session(tt_cid, {"workspace": ws_uri}, event_source="pre-invocation")
+                hook_bridge.record_active_session(plain_cid, {"workspace": ws_uri}, event_source="post-tool-use")
+                # post-tool-use with missing workspaceUri (norm_ws=None) also must NOT overwrite top-level conversationId
+                hook_bridge.record_active_session(plain_cid, {}, event_source="post-tool-use")
+            saved = json.loads(sess_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["conversationId"], tt_cid)
+            self.assertEqual(
+                saved["sessionsByWorkspace"][hook_bridge._normalize_workspace_uri(ws_uri)]["conversationId"],
+                tt_cid,
+            )
+            compact_ev = hook_bridge.build_tool_event(
+                {
+                    "conversationId": plain_cid,
+                    "stepIdx": 5,
+                    "toolCall": {"name": "edit_file", "args": {"Target": "z" * 500}},
+                    "output": "o" * 700,
+                }
+            )
+            self.assertLessEqual(len(compact_ev["args"]["Target"]), 200)
+            self.assertLessEqual(len(compact_ev["output"]), 300)
+
+        # Cross-project guard & new unassigned binding on /api/host/active-session
+        proj_bound_cid = "33333333-cccc-4444-5555-666666666666"
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                headers={"X-ThinkTank-Project-Id": "proj-alpha"},
+                json={"conversationId": proj_bound_cid, "workspaceUri": "file:///c:/workspaces/proj-bound"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(backend_app.conversations_store[proj_bound_cid].get("projectId"), "proj-alpha")
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                headers={"X-ThinkTank-Project-Id": "proj-alpha"},
+                json={"convId": proj_bound_cid, "project": "Bound", "directive": "Safe", "status": "ACTIVE", "progress": 10},
+            ).status_code,
+            200,
+        )
+        r_hijack = self.client.post(
+            "/api/host/active-session",
+            headers={"X-ThinkTank-Project-Id": "proj-beta"},
+            json={"conversationId": proj_bound_cid, "workspaceUri": "file:///c:/workspaces/hijack"},
+        )
+        self.assertEqual(r_hijack.status_code, 403)
+        self.assertNotIn("55555555-eeee-6666-7777-888888888888", backend_app.conversations_store)
+        r_hijack_new = self.client.post(
+            "/api/host/active-session",
+            headers={"X-ThinkTank-Project-Id": "proj-beta"},
+            json={"conversationId": "55555555-eeee-6666-7777-888888888888", "workspaceUri": "file:///c:/workspaces/hijack2"},
+        )
+        self.assertEqual(r_hijack_new.status_code, 200)
+
+        # Closing tt_cid lets a newly started ThinkTank case in the SAME workspace take over
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                json={"convId": tt_cid, "status": "COMPLETED", "progress": 100, "forceClose": True, "forceReason": "Done"},
+            ).status_code,
+            200,
+        )
+        tt_next_cid = "44444444-dddd-5555-6666-777777777777"
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                json={"convId": tt_next_cid, "project": "Next Tab Case", "directive": "New work", "status": "ACTIVE", "progress": 15},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                json={"conversationId": tt_next_cid, "workspaceUri": ws_uri, "eventSource": "post-tool-use"},
+            ).status_code,
+            200,
+        )
+        ctx_next = self.client.get("/api/host/context", params={"workspaceUri": ws_uri}).json()
+        self.assertEqual(ctx_next["conversationId"], tt_next_cid)
+
+        # 3. SyncEventStore.prune_bloat removes legacy TELEMETRY_UPDATE rows & trims bloated snapshots
+        with tempfile.TemporaryDirectory(prefix="tt_prune_test_") as tmp_db_dir:
+            db_path = Path(tmp_db_dir) / "bloat.sqlite3"
+            store = backend_app.SyncEventStore(str(db_path), retention=150)
+            try:
+                bloated_snap = {
+                    "id": tt_cid,
+                    "thinkTank": {"project": "Kept", "status": "ACTIVE"},
+                    "messages": [{"id": "m1", "content": "Keep me"}],
+                    "telemetry": {
+                        "toolCalls": [{"id": f"c{i}", "output": "B" * 900, "args": {"Prompt": "A" * 500}} for i in range(40)],
+                        "terminalLogs": [],
+                        "backgroundTasks": [],
+                    },
+                }
+                store.commit(
+                    conversation_id=tt_cid,
+                    event_id="ev-msg-1",
+                    event_type="NEW_MESSAGE",
+                    payload={"content": "Keep me"},
+                    snapshot=bloated_snap,
+                )
+                for idx in range(5):
+                    store.commit(
+                        conversation_id=tt_cid,
+                        event_id=f"ev-tel-{idx}",
+                        event_type="TELEMETRY_UPDATE",
+                        payload={"telemetry": bloated_snap["telemetry"]},
+                        snapshot=bloated_snap,
+                    )
+                stats = store.prune_bloat(telemetry_keep=10, vacuum=True)
+                self.assertEqual(stats["deletedTelemetryRows"], 5)
+                self.assertEqual(stats["compactedSnapshots"], 1)
+                loaded = store.load_conversations()[tt_cid]["snapshot"]
+                self.assertEqual(loaded["messages"][0]["content"], "Keep me")
+                self.assertEqual(len(loaded["telemetry"]["toolCalls"]), 10)
+                self.assertLessEqual(len(loaded["telemetry"]["toolCalls"][0]["output"]), 240)
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

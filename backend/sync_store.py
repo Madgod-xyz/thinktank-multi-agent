@@ -18,7 +18,7 @@ from typing import Any, Optional
 class SyncEventStore:
     """Atomically persist each conversation snapshot and its ordered events."""
 
-    def __init__(self, db_path: str, retention: int = 500) -> None:
+    def __init__(self, db_path: str, retention: int = 150) -> None:
         if retention < 1:
             raise ValueError("retention must be at least 1")
         self.db_path = str(db_path)
@@ -33,7 +33,9 @@ class SyncEventStore:
         )
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=FULL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute("PRAGMA busy_timeout=5000")
+        self._db.execute("PRAGMA temp_store=MEMORY")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(
             """
@@ -228,6 +230,128 @@ class SyncEventStore:
                     "updated_at": row["updated_at"],
                 }
                 for row in rows
+            }
+
+    @staticmethod
+    def compact_tool_entry(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        compact = dict(entry)
+        for field in ("output", "error"):
+            val = compact.get(field)
+            if isinstance(val, str) and len(val) > 240:
+                compact[field] = val[:240]
+        raw_args = compact.get("args")
+        if isinstance(raw_args, dict):
+            trimmed: dict[str, Any] = {}
+            for idx, (k, v) in enumerate(raw_args.items()):
+                if idx >= 8:
+                    break
+                if isinstance(v, str) and len(v) > 160:
+                    trimmed[k] = v[:160]
+                elif isinstance(v, (list, dict)):
+                    s = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                    trimmed[k] = s[:160] if len(s) > 160 else v
+                else:
+                    trimmed[k] = v
+            compact["args"] = trimmed
+        return compact
+
+    @classmethod
+    def compact_telemetry_store(cls, telemetry: Any, *, max_calls: int = 25) -> dict[str, Any]:
+        if not isinstance(telemetry, dict):
+            return {"toolCalls": [], "terminalLogs": [], "backgroundTasks": []}
+        out = dict(telemetry)
+        calls = out.get("toolCalls")
+        if isinstance(calls, list):
+            out["toolCalls"] = [cls.compact_tool_entry(c) for c in calls[:max_calls]]
+        logs = out.get("terminalLogs")
+        if isinstance(logs, list):
+            trimmed_logs = []
+            for item in logs[:max_calls]:
+                if isinstance(item, dict) and isinstance(item.get("output"), str) and len(item["output"]) > 400:
+                    trimmed_logs.append({**item, "output": item["output"][:400]})
+                else:
+                    trimmed_logs.append(item)
+            out["terminalLogs"] = trimmed_logs
+        return out
+
+    def save_snapshot_only(self, conversation_id: str, snapshot: dict[str, Any]) -> None:
+        """Persist conversation snapshot and updated_at without creating an events row or advancing seq."""
+        snapshot_json = self._json(snapshot)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._ensure_conversation(conversation_id)
+                now = time.time()
+                self._db.execute(
+                    "UPDATE conversations SET snapshot_json = ?, updated_at = ? WHERE conversation_id = ?",
+                    (snapshot_json, now, conversation_id),
+                )
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+
+    def prune_bloat(
+        self,
+        *,
+        telemetry_keep: int = 20,
+        max_events_per_conv: Optional[int] = None,
+        vacuum: bool = True,
+    ) -> dict[str, int]:
+        """Remove legacy TELEMETRY_UPDATE bloat rows and trim stored snapshot telemetry."""
+        limit = max(1, int(max_events_per_conv or self.retention))
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._db.execute("DELETE FROM events WHERE event_type = 'TELEMETRY_UPDATE'")
+                deleted_telemetry_rows = cur.rowcount if cur.rowcount >= 0 else 0
+                cur_ret = self._db.execute(
+                    """
+                    DELETE FROM events
+                    WHERE EXISTS (
+                        SELECT 1 FROM conversations c
+                        WHERE c.conversation_id = events.conversation_id
+                          AND events.seq <= c.seq - ?
+                    )
+                    """,
+                    (limit,),
+                )
+                deleted_retention_rows = cur_ret.rowcount if cur_ret.rowcount >= 0 else 0
+
+                compacted_snapshots = 0
+                rows = self._db.execute("SELECT conversation_id, snapshot_json FROM conversations").fetchall()
+                for row in rows:
+                    try:
+                        snap = json.loads(row["snapshot_json"])
+                    except Exception:
+                        continue
+                    if not isinstance(snap, dict) or not isinstance(snap.get("telemetry"), dict):
+                        continue
+                    compacted = self.compact_telemetry_store(snap["telemetry"], max_calls=telemetry_keep)
+                    if compacted != snap["telemetry"]:
+                        snap["telemetry"] = compacted
+                        self._db.execute(
+                            "UPDATE conversations SET snapshot_json = ? WHERE conversation_id = ?",
+                            (self._json(snap), row["conversation_id"]),
+                        )
+                        compacted_snapshots += 1
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+
+            if vacuum:
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                if self.db_path != ":memory:":
+                    self._db.execute("VACUUM")
+                    self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+            return {
+                "deletedTelemetryRows": deleted_telemetry_rows,
+                "deletedRetentionRows": deleted_retention_rows,
+                "compactedSnapshots": compacted_snapshots,
             }
 
     def close(self) -> None:

@@ -5,6 +5,7 @@ import json
 import asyncio
 import hashlib
 import re
+import threading
 import time
 import urllib.parse
 import uuid
@@ -50,6 +51,7 @@ async def lifespan(_app):
         recovery_task.cancel()
         with suppress(asyncio.CancelledError):
             await recovery_task
+        flush_scheduled_state_save()
 
 
 app = FastAPI(title="Think Tank Matrix - Interactive Engine", version="3.6.0", lifespan=lifespan)
@@ -76,8 +78,10 @@ async def idempotency_event_id(request, call_next):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and "application/json" in request.headers.get("content-type", "").lower():
         try:
             body = json.loads(await request.body())
-            if isinstance(body, dict) and isinstance(body.get("convId"), str):
-                body_conv_id = body["convId"].strip() or None
+            if isinstance(body, dict):
+                raw_bcid = body.get("convId") or body.get("parentConversationId") or body.get("conversationId")
+                if isinstance(raw_bcid, str):
+                    body_conv_id = raw_bcid.strip() or None
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass  # Let FastAPI return its usual validation response for malformed JSON.
 
@@ -91,22 +95,15 @@ async def idempotency_event_id(request, call_next):
     if project_id and owner and owner != project_id:
         return JSONResponse({"status": "error", "detail": "This session belongs to a different project."}, status_code=403)
 
-    if project_id and conv_id and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {"/api/status", "/status"}:
+    if project_id and conv_id and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {"/api/status", "/status", "/api/host/active-session"}:
         conv = get_or_create_conversation(conv_id)
         owner = conv.get("projectId")
         if owner and owner != project_id:
             return JSONResponse({"status": "error", "detail": "This session belongs to a different project."}, status_code=403)
         if not owner:
             conv["projectId"] = project_id
-            sync_store.commit(
-                conversation_id=conv_id,
-                event_id=f"project-scope-{uuid.uuid4()}",
-                event_type="PROJECT_SCOPE_ASSIGNED",
-                payload={"convId": conv_id, "projectId": project_id},
-                snapshot=conv,
-                source="project-scope",
-            )
-            save_persisted_state()
+            sync_store.save_snapshot_only(conv_id, conv)
+            schedule_persisted_state_save()
 
     event_token = request_event_id.set(supplied[:200] or None)
     project_token = request_project_id.set(project_id)
@@ -222,19 +219,36 @@ def create_empty_conversation(cid: str) -> Dict[str, Any]:
     return conv
 
 
+_GENERIC_HOST_AGENTS = {"antigravity", "main_agent"}
+
+
 def has_thinktank_activity(conv: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(conv, dict):
         return False
     tt = conv.get("thinkTank") or {}
-    status = str(tt.get("status") or "DISCONNECTED").upper().strip()
-    if status not in {"", "DISCONNECTED", "IDLE"}:
+    if tt.get("isClosed"):
         return True
     if str(tt.get("project") or "").strip() or str(tt.get("directive") or "").strip():
         return True
+    if int(tt.get("runIndex") or 1) > 1 or int(tt.get("stageEpochSeq") or 0) > 0:
+        return True
     prop = conv.get("proposal")
     has_prop = bool(prop) and (not isinstance(prop, dict) or prop.get("status") != "NONE")
-    if conv.get("messages") or conv.get("subtasks") or conv.get("agents") or has_prop or conv.get("review") or conv.get("findings") or tt.get("triageDecision"):
+    if conv.get("messages") or conv.get("subtasks") or has_prop or conv.get("review") or conv.get("findings") or tt.get("triageDecision"):
         return True
+    for ag in conv.get("agents") or []:
+        if not isinstance(ag, dict):
+            continue
+        aid = str(ag.get("id") or "").strip().lower()
+        if ag.get("verifiedSubagent") or (aid and aid not in _GENERIC_HOST_AGENTS):
+            return True
+    status = str(tt.get("status") or "DISCONNECTED").upper().strip()
+    if status not in {"", "DISCONNECTED", "IDLE"} and not conv.get("_telemetryOnly"):
+        if int(tt.get("round") or 0) > 0 or int(tt.get("progress") or 0) > 0:
+            return True
+        tel = conv.get("telemetry") or {}
+        if not (tel.get("toolCalls") or tel.get("terminalLogs") or tel.get("backgroundTasks")):
+            return True
     return False
 
 
@@ -1134,14 +1148,21 @@ def load_persisted_state():
             active_conv_id = subagent_session_map[active_conv_id]["parentConvId"]
         if active_conv_id not in conversations_store:
             active_conv_id = next(iter(conversations_store), "default")
-        for cid, snapshot in sorted(conversations_store.items(), key=lambda kv: get_conv_sort_ts(kv[1])):
-            norm_ws = _normalize_workspace_key(snapshot.get("workspaceUri"))
-            if norm_ws and cid != "default" and "--run-" not in cid and not snapshot.get("isArchivedRun"):
-                sessions_by_workspace[norm_ws] = {
-                    "conversationId": cid,
-                    "projectId": snapshot.get("projectId"),
-                    "timestamp": get_conv_sort_ts(snapshot),
-                }
+        for tier in (0, 1, 2):
+            # Tier 0: plain non-ThinkTank, Tier 1: closed ThinkTank, Tier 2: unclosed ThinkTank (highest priority)
+            for cid, snapshot in sorted(conversations_store.items(), key=lambda kv: get_conv_sort_ts(kv[1])):
+                has_tt = has_thinktank_activity(snapshot)
+                is_closed = bool((snapshot.get("thinkTank") or {}).get("isClosed"))
+                snap_tier = 2 if (has_tt and not is_closed) else (1 if has_tt else 0)
+                if snap_tier != tier:
+                    continue
+                norm_ws = _normalize_workspace_key(snapshot.get("workspaceUri"))
+                if norm_ws and cid != "default" and "--run-" not in cid and not snapshot.get("isArchivedRun"):
+                    sessions_by_workspace[norm_ws] = {
+                        "conversationId": cid,
+                        "projectId": snapshot.get("projectId"),
+                        "timestamp": get_conv_sort_ts(snapshot),
+                    }
         active = get_or_create_conversation(active_conv_id)
         return active["thinkTank"], active["proposal"], active["agents"], active["messages"], active["telemetry"], active["collaborations"]
 
@@ -1199,25 +1220,81 @@ def load_persisted_state():
     conv = get_or_create_conversation(active_conv_id)
     return conv["thinkTank"], conv["proposal"], conv["agents"], conv["messages"], conv["telemetry"], conv["collaborations"]
 
+_state_save_lock = threading.RLock()
+_state_save_timer: Optional[threading.Timer] = None
+_state_dirty = False
+
+
 def save_persisted_state():
-    try:
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-        active_conv = get_or_create_conversation(active_conv_id)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({
+    global _state_dirty, _state_save_timer
+    needs_retry = False
+    with _state_save_lock:
+        if _state_save_timer is not None:
+            _state_save_timer.cancel()
+            _state_save_timer = None
+        _state_dirty = False
+        target_file = STATE_FILE
+        try:
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            active_conv = conversations_store.get(active_conv_id) or create_empty_conversation(active_conv_id)
+            convs_snapshot = copy.deepcopy(dict(conversations_store))
+            for c_obj in convs_snapshot.values():
+                if isinstance(c_obj, dict) and isinstance(c_obj.get("telemetry"), dict):
+                    c_obj["telemetry"] = SyncEventStore.compact_telemetry_store(c_obj["telemetry"], max_calls=25)
+            payload_text = json.dumps({
                 "activeConversationId": active_conv_id,
-                "conversations": conversations_store,
-                "subagentSessionMap": subagent_session_map,
+                "conversations": convs_snapshot,
+                "subagentSessionMap": dict(subagent_session_map),
                 "thinkTank": active_conv["thinkTank"],
                 "proposal": active_conv["proposal"],
                 "agents": active_conv["agents"],
                 "messages": active_conv["messages"],
                 "telemetry": active_conv["telemetry"],
                 "collaborations": active_conv.get("collaborations", default_collaborations_store),
-                "updatedAt": time.time()
-            }, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[State] Error saving {STATE_FILE}: {e}")
+                "updatedAt": time.time(),
+            }, ensure_ascii=False, separators=(",", ":"))
+            tmp_file = f"{target_file}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                f.write(payload_text)
+            os.replace(tmp_file, target_file)
+        except RuntimeError:
+            if threading.current_thread() is not threading.main_thread():
+                needs_retry = True
+        except Exception as e:
+            print(f"[State] Error saving {target_file}: {e}")
+    if needs_retry:
+        schedule_persisted_state_save(0.3)
+
+
+def _flush_timer_callback(expected_file: str) -> None:
+    global _state_save_timer
+    with _state_save_lock:
+        _state_save_timer = None
+        if STATE_FILE != expected_file:
+            return
+    save_persisted_state()
+
+
+def schedule_persisted_state_save(delay: float = 4.0) -> None:
+    """Coalesce high-frequency state dumps off the FastAPI event loop."""
+    global _state_dirty, _state_save_timer
+    with _state_save_lock:
+        _state_dirty = True
+        if _state_save_timer is None:
+            timer = threading.Timer(delay, _flush_timer_callback, args=(STATE_FILE,))
+            timer.daemon = True
+            _state_save_timer = timer
+            timer.start()
+
+
+def flush_scheduled_state_save() -> None:
+    with _state_save_lock:
+        dirty = _state_dirty
+        if _state_save_timer is not None:
+            _state_save_timer.cancel()
+            _state_save_timer = None
+    if dirty:
+        save_persisted_state()
 
 think_tank_state, current_proposal, agents_state, messages_store, telemetry_store, collaborations_store = load_persisted_state()
 
@@ -1334,6 +1411,22 @@ class ConnectionManager:
                 except Exception:
                     self.disconnect(connection)
 
+    async def broadcast_transient(self, data: dict):
+        """Deliver ephemeral updates to live WS subscribers without advancing SQLite seq or bloating events."""
+        conv_id = data.get("convId")
+        if not conv_id:
+            return
+        message = dict(data)
+        message.setdefault("convId", conv_id)
+        async with self.lock:
+            for connection, subscribed_conv in list(self.active_connections.items()):
+                if subscribed_conv != conv_id:
+                    continue
+                try:
+                    await self._send(connection, message)
+                except Exception:
+                    self.disconnect(connection)
+
 manager = ConnectionManager()
 
 @app.websocket("/ws")
@@ -1350,15 +1443,8 @@ async def websocket_endpoint(websocket: WebSocket):
     owner = conv.get("projectId")
     if project_id and not owner:
         conv["projectId"] = project_id
-        sync_store.commit(
-            conversation_id=conv_id,
-            event_id=f"project-scope-{uuid.uuid4()}",
-            event_type="PROJECT_SCOPE_ASSIGNED",
-            payload={"convId": conv_id, "projectId": project_id},
-            snapshot=conv,
-            source="project-scope",
-        )
-        save_persisted_state()
+        sync_store.save_snapshot_only(conv_id, conv)
+        schedule_persisted_state_save()
     elif project_id and owner and owner != project_id:
         await websocket.close(code=1008, reason="This session belongs to a different project")
         return
@@ -1391,17 +1477,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 ROLE_CATALOG_FILE = os.path.join(os.path.dirname(__file__), "role_catalog.json")
+_ROLE_CATALOG_CACHE: Optional[tuple[float, List[Dict[str, Any]]]] = None
+
 
 def load_role_catalog():
+    global _ROLE_CATALOG_CACHE
     if os.path.exists(ROLE_CATALOG_FILE):
         try:
+            mtime = os.path.getmtime(ROLE_CATALOG_FILE)
+            if _ROLE_CATALOG_CACHE and _ROLE_CATALOG_CACHE[0] == mtime:
+                return _ROLE_CATALOG_CACHE[1]
             with open(ROLE_CATALOG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                _ROLE_CATALOG_CACHE = (mtime, data)
+                return data
         except Exception:
             pass
     return []
 
-@app.get("/api/roles")
 @app.get("/roles")
 @app.get("/api/roles")
 def get_roles():
@@ -1466,6 +1559,10 @@ def _build_conv_row(cid: str, c: Dict[str, Any], target_cid: str) -> Dict[str, A
     }
 
 
+def _is_unclosed_thinktank(conv: Optional[Dict[str, Any]]) -> bool:
+    return bool(conv and has_thinktank_activity(conv) and not (conv.get("thinkTank") or {}).get("isClosed"))
+
+
 def _refresh_active_conv_id_from_file() -> None:
     global active_conv_id, active_conv_workspace_uri
     active_file = _resolve_active_session_file()
@@ -1483,7 +1580,13 @@ def _refresh_active_conv_id_from_file() -> None:
                         if ws_cid:
                             mapped_ws = _ensure_subagent_mapping(ws_cid)
                             resolved_ws_cid = mapped_ws["parentConvId"] if mapped_ws else ws_cid
-                            prev_ts = float((sessions_by_workspace.get(norm_k) or {}).get("timestamp") or 0.0)
+                            existing_entry = sessions_by_workspace.get(norm_k) or {}
+                            existing_cid = str(existing_entry.get("conversationId") or "").strip()
+                            existing_unclosed = existing_cid in conversations_store and _is_unclosed_thinktank(conversations_store[existing_cid])
+                            cand_has_tt = resolved_ws_cid in conversations_store and has_thinktank_activity(conversations_store[resolved_ws_cid])
+                            if existing_unclosed and not cand_has_tt and existing_cid != resolved_ws_cid:
+                                continue
+                            prev_ts = float(existing_entry.get("timestamp") or 0.0)
                             cand_ts = float(ws_info.get("timestamp") or 0.0)
                             if norm_k not in sessions_by_workspace or cand_ts >= prev_ts:
                                 sessions_by_workspace[norm_k] = {
@@ -1518,10 +1621,12 @@ def _resolve_workspace_conv_id(workspace_uri: Optional[str]) -> Optional[str]:
     ws_entry = sessions_by_workspace.get(norm_ws)
     if ws_entry and ws_entry.get("conversationId"):
         mapped_cid = str(ws_entry["conversationId"])
-        if "--run-" not in mapped_cid and mapped_cid in conversations_store and has_thinktank_activity(conversations_store[mapped_cid]):
+        if "--run-" not in mapped_cid and mapped_cid in conversations_store and _is_unclosed_thinktank(conversations_store[mapped_cid]):
             return mapped_cid
     if ws_candidates:
-        ws_candidates.sort(key=lambda kv: get_conv_sort_ts(kv[1]), reverse=True)
+        ws_candidates.sort(
+            key=lambda kv: (0 if not (kv[1].get("thinkTank") or {}).get("isClosed") else 1, -get_conv_sort_ts(kv[1])),
+        )
         return ws_candidates[0][0]
     if ws_entry and ws_entry.get("conversationId"):
         mapped_cid = str(ws_entry["conversationId"])
@@ -1563,6 +1668,7 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
     raw_cid = payload.get("conversationId")
     if raw_cid and isinstance(raw_cid, str):
         raw_cid = raw_cid.strip()
+        ev_source = str(payload.get("eventSource") or "").strip().lower()
         mapped = _ensure_subagent_mapping(
             raw_cid,
             parent_cid=payload.get("parentConversationId"),
@@ -1570,24 +1676,39 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
             role_title=payload.get("roleTitle"),
         )
         cid = mapped["parentConvId"] if mapped else raw_cid
-        active_conv_id = cid
+        req_pid = request_project_id.get()
+        existing_conv = conversations_store.get(cid)
+        existing_owner = existing_conv.get("projectId") if existing_conv else None
+        if req_pid and existing_owner and existing_owner != req_pid:
+            raise HTTPException(status_code=403, detail="This session is not assigned to the active project.")
         conv = get_or_create_conversation(cid)
-        pid = _valid_project_id_str(payload.get("projectId"))
+        pid = req_pid or _valid_project_id_str(payload.get("projectId"))
         meta_dirty = False
         if pid and not conv.get("projectId"):
             conv["projectId"] = pid
             meta_dirty = True
         norm_ws = _normalize_workspace_key(payload.get("workspaceUri") or payload.get("workspace"))
-        active_conv_workspace_uri = norm_ws or _normalize_workspace_key(conv.get("workspaceUri"))
+        existing_ws_cid = str((sessions_by_workspace.get(norm_ws) or {}).get("conversationId") or "").strip() if norm_ws else ""
+        existing_ws_conv = conversations_store.get(existing_ws_cid) if existing_ws_cid else None
+        can_claim_workspace = True
+        if norm_ws and existing_ws_cid and existing_ws_cid != cid:
+            if ev_source == "post-tool-use" and (not has_thinktank_activity(conv) or _is_unclosed_thinktank(existing_ws_conv)):
+                can_claim_workspace = False
+            elif _is_unclosed_thinktank(existing_ws_conv) and not has_thinktank_activity(conv):
+                can_claim_workspace = False
+        if can_claim_workspace or not active_conv_id or active_conv_id == "default":
+            active_conv_id = cid
+            active_conv_workspace_uri = norm_ws or _normalize_workspace_key(conv.get("workspaceUri"))
         if norm_ws:
             if conv.get("workspaceUri") != norm_ws:
                 conv["workspaceUri"] = norm_ws
                 meta_dirty = True
-            sessions_by_workspace[norm_ws] = {
-                "conversationId": cid,
-                "projectId": conv.get("projectId"),
-                "timestamp": time.time(),
-            }
+            if can_claim_workspace:
+                sessions_by_workspace[norm_ws] = {
+                    "conversationId": cid,
+                    "projectId": conv.get("projectId"),
+                    "timestamp": time.time(),
+                }
         agent_updated = False
         if mapped:
             tt = conv.get("thinkTank") or {}
@@ -1603,17 +1724,13 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
                     verified_subagent=True,
                 )
         if meta_dirty or agent_updated:
-            sync_store.commit(
-                conversation_id=cid,
-                event_id=f"host-session-{cid}-{uuid.uuid4().hex[:8]}",
-                event_type="HOST_SESSION_UPDATED",
-                payload={"convId": cid, "workspaceUri": conv.get("workspaceUri"), "projectId": conv.get("projectId")},
-                snapshot=conv,
-                source="host-session",
-            )
-        save_persisted_state()
+            sync_store.save_snapshot_only(cid, conv)
+        schedule_persisted_state_save()
         if agent_updated:
-            await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
+            if has_thinktank_activity(conv):
+                await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
+            else:
+                await manager.broadcast_transient({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
         return {"status": "ok", "activeConversationId": active_conv_id}
     return {"status": "error", "message": "Invalid conversationId"}
 
@@ -1716,6 +1833,17 @@ def _build_status_payload(target_cid: str) -> Dict[str, Any]:
         "syncMode": "durable-websocket",
         "stateFreshness": freshness,
         "stateAgeSeconds": int(state_age_seconds),
+    }
+
+
+@app.get("/api/health")
+@app.get("/health")
+def get_health():
+    return {
+        "ok": True,
+        "status": "ok",
+        "syncMode": "durable-websocket",
+        "conversationsCount": len(conversations_store),
     }
 
 
@@ -2131,6 +2259,7 @@ async def update_task(req: TaskUpdateRequest):
                 ag["status"] = "IDLE"
                 ag["activeTool"] = None
                 ag["tool"] = None
+        conv.pop("_telemetryOnly", None)
         if req.project:
             tt["project"] = req.project
         if req.directive:
@@ -2190,6 +2319,7 @@ async def update_task(req: TaskUpdateRequest):
                     detail=f"Cannot close session while {len(unresolved)} unresolved finding(s) remain ({ids}). Resolve them or pass forceClose with forceReason.",
                 )
 
+        conv.pop("_telemetryOnly", None)
         if req.project:
             tt["project"] = req.project
         if req.directive:
@@ -3785,9 +3915,12 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
         raise HTTPException(status_code=403, detail="This session is not assigned to the active project.")
     conv = get_or_create_conversation(cid)
     tt = conv.setdefault("thinkTank", {})
+    had_tt_before = has_thinktank_activity(conv)
     is_closed = bool(tt.get("isClosed")) or str(tt.get("status") or "").upper() in {"COMPLETED", "DONE", "CLOSED"}
     if not is_closed and tt.get("status") in {"DISCONNECTED", "UNKNOWN", "IDLE"}:
         tt["status"] = "ACTIVE"
+        if not had_tt_before:
+            conv["_telemetryOnly"] = True
 
     telemetry = conv.setdefault("telemetry", {"toolCalls": [], "terminalLogs": [], "backgroundTasks": []})
     calls = telemetry.setdefault("toolCalls", [])
@@ -3803,7 +3936,7 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
         else (mapped.get("roleTitle") or mapped_role if mapped else (req.agentName or "Antigravity"))
     )
     tool_name = req.tool.strip()
-    entry = {
+    entry = SyncEventStore.compact_tool_entry({
         "id": req.id,
         "agentId": entry_agent_id,
         "agentName": entry_agent_name,
@@ -3816,17 +3949,19 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
         "timestamp": time.strftime("%H:%M:%S"),
         "source": "antigravity-hook",
         "stepIdx": req.stepIdx,
-    }
+    })
     if mapped:
         entry["subagentConvId"] = raw_cid
     calls.insert(0, entry)
-    telemetry["toolCalls"] = calls[:50]
+    telemetry["toolCalls"] = calls[:25]
 
     # Do not re-activate an already closed session when host tool telemetry arrives
     agent_updated = False
+    durable_agent_event = False
     if not is_closed:
         if mapped_role and mapped_role not in {"user", "subagent"}:
-            agent_updated |= upsert_agent_state(
+            was_known = any(normalize_agent_id(a.get("id", "")) == mapped_role and a.get("verifiedSubagent") for a in conv.get("agents") or [])
+            changed = upsert_agent_state(
                 conv,
                 mapped_role,
                 name=req.agentName if (req.agentName and req.agentName != "Antigravity") else None,
@@ -3836,6 +3971,9 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                 verified_subagent=True,
                 increment_turn=True,
             )
+            agent_updated |= changed
+            if changed and not was_known:
+                durable_agent_event = True
         else:
             ag_target = normalize_agent_id(req.agentId or "main_agent")
             if ag_target and ag_target != "user":
@@ -3848,6 +3986,7 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                 )
 
         if tool_name.endswith("invoke_subagent"):
+            durable_agent_event = True
             args = req.args or {}
             type_name = str(args.get("TypeName") or args.get("typeName") or args.get("type_name") or "").strip()
             role_desc = str(args.get("Role") or args.get("role") or args.get("Description") or "").strip()
@@ -3900,6 +4039,7 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                 recip_info = _ensure_subagent_mapping(recip_cid)
                 recip_role = recip_info.get("roleId") if recip_info else None
                 if recip_role and recip_role not in {"user", "subagent"}:
+                    durable_agent_event = True
                     agent_updated |= upsert_agent_state(
                         conv,
                         recip_role,
@@ -3910,10 +4050,14 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                         increment_turn=True,
                     )
 
-    save_persisted_state()
-    await manager.broadcast({"type": "TELEMETRY_UPDATE", "convId": cid, "telemetry": telemetry})
+    sync_store.save_snapshot_only(cid, conv)
+    schedule_persisted_state_save()
+    await manager.broadcast_transient({"type": "TELEMETRY_UPDATE", "convId": cid, "telemetryEntry": entry})
     if agent_updated:
-        await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
+        if durable_agent_event and has_thinktank_activity(conv):
+            await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
+        else:
+            await manager.broadcast_transient({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
     return {"status": "ok", "convId": cid, "entry": entry}
 
 
@@ -3936,7 +4080,7 @@ async def log_tool_call(req: ToolCallLogRequest):
     conv = get_or_create_conversation(cid)
     
     call_id = req.id or f"tc-{int(time.time()*1000)}"
-    entry = {
+    entry = SyncEventStore.compact_tool_entry({
         "id": call_id,
         "agentId": req.agentId,
         "agentName": req.agentName or req.agentId,
@@ -3946,11 +4090,11 @@ async def log_tool_call(req: ToolCallLogRequest):
         "status": req.status,
         "latencyMs": req.latencyMs,
         "timestamp": time.strftime("%H:%M:%S")
-    }
+    })
     telem = conv["telemetry"]
     telem.setdefault("toolCalls", []).insert(0, entry)
-    if len(telem["toolCalls"]) > 50:
-        telem["toolCalls"] = telem["toolCalls"][:50]
+    if len(telem["toolCalls"]) > 25:
+        telem["toolCalls"] = telem["toolCalls"][:25]
 
     ag_target = normalize_agent_id(req.agentId or "main_agent")
     agent_updated = False
@@ -3963,14 +4107,15 @@ async def log_tool_call(req: ToolCallLogRequest):
             status="ACTIVE",
         )
 
-    save_persisted_state()
-    await manager.broadcast({
+    sync_store.save_snapshot_only(cid, conv)
+    schedule_persisted_state_save()
+    await manager.broadcast_transient({
         "type": "TELEMETRY_UPDATE",
         "convId": cid,
-        "telemetry": telem
+        "telemetryEntry": entry,
     })
     if agent_updated:
-        await manager.broadcast({
+        await manager.broadcast_transient({
             "type": "AGENTS_UPDATE",
             "convId": cid,
             "agents": conv["agents"]
@@ -4000,19 +4145,20 @@ async def log_terminal(req: TerminalLogRequest):
         "agentId": req.agentId,
         "agentName": req.agentName or req.agentId,
         "command": req.command,
-        "output": req.output,
+        "output": (req.output or "")[:400],
         "exitCode": req.exitCode,
         "timestamp": time.strftime("%H:%M:%S")
     }
     telem = conv["telemetry"]
     telem.setdefault("terminalLogs", []).insert(0, entry)
-    if len(telem["terminalLogs"]) > 50:
-        telem["terminalLogs"] = telem["terminalLogs"][:50]
-    save_persisted_state()
-    await manager.broadcast({
+    if len(telem["terminalLogs"]) > 25:
+        telem["terminalLogs"] = telem["terminalLogs"][:25]
+    sync_store.save_snapshot_only(cid, conv)
+    schedule_persisted_state_save()
+    await manager.broadcast_transient({
         "type": "TELEMETRY_UPDATE",
         "convId": cid,
-        "telemetry": telem
+        "terminalLog": entry,
     })
     return {"status": "ok", "entry": entry}
 
@@ -4061,11 +4207,12 @@ async def log_task(req: TaskLogRequest):
             "startedAt": time.strftime("%H:%M:%S")
         }
         tasks.insert(0, entry)
-    save_persisted_state()
-    await manager.broadcast({
+    sync_store.save_snapshot_only(cid, conv)
+    schedule_persisted_state_save()
+    await manager.broadcast_transient({
         "type": "TELEMETRY_UPDATE",
         "convId": cid,
-        "telemetry": conv["telemetry"]
+        "backgroundTask": tasks[0] if tasks else None,
     })
     return {"status": "ok", "tasks": tasks}
 
@@ -4095,9 +4242,10 @@ async def execute_tool(req: ToolExecuteRequest):
         "timestamp": time.strftime("%H:%M:%S"),
     }
     calls = conv["telemetry"].setdefault("toolCalls", [])
-    calls.insert(0, entry)
-    del calls[50:]
-    await manager.broadcast({"type": "TELEMETRY_UPDATE", "convId": cid, "telemetry": conv["telemetry"]})
+    calls.insert(0, SyncEventStore.compact_tool_entry(entry))
+    del calls[25:]
+    sync_store.save_snapshot_only(cid, conv)
+    await manager.broadcast_transient({"type": "TELEMETRY_UPDATE", "convId": cid, "telemetryEntry": calls[0]})
     return {
         "status": "executed" if result.get("success") else "not_executed",
         "convId": cid,
