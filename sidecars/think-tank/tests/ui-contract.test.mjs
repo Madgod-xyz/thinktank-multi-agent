@@ -587,3 +587,169 @@ test('F-01, F-03, F-04, F-06: Parent session resolution, WORKING status helper, 
   vm.runInNewContext(`${pyMatch[0]}\nthis.__py = resolveBackendPython();`, pyFallbackSb);
   assert.equal(pyFallbackSb.__py, 'python3');
 });
+
+test('Cross-tab live sync: continuous host-context watch, parent-resolved snapshot acceptance, and empty-state recovery controls', () => {
+  assert.match(html, /id="btn-sync-host-session"/, 'index.html must render #btn-sync-host-session in empty state');
+  assert.match(html, /id="empty-active-sessions"/, 'index.html must render #empty-active-sessions container');
+  assert.match(appJs, /function startHostContextWatch\(/, 'app.js must define continuous startHostContextWatch()');
+  assert.match(appJs, /startHostContextWatch\(\);/, 'app.js init() must invoke startHostContextWatch()');
+  assert.doesNotMatch(
+    mainMjs,
+    /window\.sidecar\s*=\s*Object\.assign\(window\.sidecar\s*\|\|\s*\{\},\s*\{\s*conversationId:/,
+    'main.mjs must not unconditionally overwrite preload.js window.sidecar.conversationId',
+  );
+
+  // VM test 1: normalizeWorkspaceUri & cross-workspace active_antigravity_session isolation in main.mjs
+  const wsNormMatch = mainMjs.match(/function normalizeWorkspaceUri\(raw\)\s*\{[\s\S]*?\n\}/);
+  const ctxMatch = mainMjs.match(/function getActiveSessionContext\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(wsNormMatch && ctxMatch, 'main.mjs must define normalizeWorkspaceUri and getActiveSessionContext');
+  const mainCtxSb = {
+    app: { config: {} },
+    homedir: () => '/tmp/test-home',
+    join: (...parts) => parts.join('/'),
+    existsSync: (p) => p.endsWith('active_antigravity_session.json'),
+    readFileSync: () => JSON.stringify({
+      conversationId: 'conv-ws-a',
+      workspaceUri: 'file:///c:/workspaces/repo-a',
+      sessionsByWorkspace: { 'file:///c:/workspaces/repo-a': { conversationId: 'conv-ws-a' } },
+    }),
+    process: { env: {}, platform: 'win32' },
+  };
+  vm.runInNewContext(
+    `${wsNormMatch[0]}\n${ctxMatch[0]}\nthis.__norm = normalizeWorkspaceUri('file:///C%3A/workspaces/Dev/Repo/');\nthis.__otherWs = getActiveSessionContext('file:///c:/workspaces/repo-b');\nthis.__sameWs = getActiveSessionContext('file:///C%3A/workspaces/repo-a/');`,
+    mainCtxSb,
+  );
+  assert.equal(mainCtxSb.__norm, 'file:///c:/workspaces/dev/repo');
+  assert.equal(mainCtxSb.__otherWs.conversationId, '');
+  assert.equal(mainCtxSb.__otherWs.workspaceMatched, false);
+  assert.equal(mainCtxSb.__sameWs.conversationId, 'conv-ws-a');
+
+  // VM test 2: resolveHostConvId ignores stale ?conversationId= when live ctx has newer tab or workspaceMatched === false
+  const resolveFnMatch = appJs.match(/function resolveHostConvId\(ctx\)\s*\{[\s\S]*?\n\s{2}\}/);
+  assert.ok(resolveFnMatch, 'app.js must define resolveHostConvId(ctx)');
+  const resSb = {
+    window: {
+      location: { search: '?conversationId=stale-tab-1' },
+      __ANTIGRAVITY_HOST_CONTEXT__: { conversationId: 'stale-tab-1' },
+      sidecar: { conversationId: 'stale-tab-1' },
+    },
+    URLSearchParams,
+  };
+  vm.runInNewContext(
+    `${resolveFnMatch[0]}\nthis.__live = resolveHostConvId({ conversationId: 'live-tab-2', workspaceMatched: true });\nthis.__unmatched = resolveHostConvId({ conversationId: '', workspaceMatched: false });`,
+    resSb,
+  );
+  assert.equal(resSb.__live, 'live-tab-2');
+  assert.equal(resSb.__unmatched, '');
+
+  // VM test 3: applySnapshot resolves child -> parent and rejects stale lower sync.seq
+  const computeFnMatch = appJs.match(/function computeHasSession\(data, tt\)\s*\{[\s\S]*?\n\s{2}\}/);
+  const applyFnMatch = appJs.match(/function applySnapshot\(data, requestedCid = null\)\s*\{[\s\S]*?\n\s{2}\}/);
+  assert.ok(computeFnMatch && applyFnMatch, 'app.js must define computeHasSession & applySnapshot');
+  const snapSb = {
+    dataRevision: 0,
+    lastSnapshotHash: '',
+    getMaxRecordedSeq: () => 5,
+    renderAll: () => {},
+    state: {
+      activeConvId: 'child-uuid-1',
+      userPinnedConv: false,
+      hasSession: false,
+      runIndex: 1,
+      lastSeenSeq: 0,
+      replayLive: true,
+      replaySeq: 0,
+      project: '',
+      directive: '',
+      phase: '',
+      status: 'DISCONNECTED',
+      progress: 0,
+      round: 0,
+      maxRounds: 50,
+      roleCaps: {},
+      agents: [],
+      messages: [],
+      interactions: [],
+      findings: [],
+      fileLocks: [],
+      subtasks: [],
+    },
+  };
+  vm.runInNewContext(`${computeFnMatch[0]}\n${applyFnMatch[0]}\nthis.__apply = applySnapshot;`, snapSb);
+  snapSb.__apply(
+    { convId: 'parent-uuid-9', parentConvId: 'parent-uuid-9', hasSession: true, thinkTank: { project: 'Live Case', status: 'ACTIVE' }, sync: { seq: 10, generation: 'g1' } },
+    'child-uuid-1',
+  );
+  assert.equal(snapSb.state.activeConvId, 'parent-uuid-9');
+  assert.equal(snapSb.state.hasSession, true);
+  assert.equal(snapSb.state.lastSeenSeq, 10);
+  // Stale HTTP response (seq 4 < lastSeenSeq 10) for same convId must be ignored
+  snapSb.__apply(
+    { convId: 'parent-uuid-9', parentConvId: 'parent-uuid-9', hasSession: true, thinkTank: { project: 'Stale Case', status: 'ACTIVE' }, sync: { seq: 4, generation: 'g1' } },
+    'parent-uuid-9',
+  );
+  assert.equal(snapSb.state.project, 'Live Case');
+
+  // VM test 4: fetchStatusForConv('') uses convId=default + workspaceUri when workspaceUri is set
+  const fetchFnMatch = appJs.match(/async function fetchStatusForConv\(cid\)\s*\{[\s\S]*?\n\s{2}\}/);
+  assert.ok(fetchFnMatch, 'app.js must define fetchStatusForConv(cid)');
+  const calledUrls = [];
+  const fetchSb = {
+    state: { activeConvId: '', workspaceUri: 'file:///c:/workspaces/ws-b' },
+    URLSearchParams,
+    apiGet: async (url) => { calledUrls.push(url); return {}; },
+  };
+  vm.runInNewContext(`${fetchFnMatch[0]}\nfetchStatusForConv('');`, fetchSb);
+  assert.equal(calledUrls[0], '/api/status?convId=default&workspaceUri=file%3A%2F%2F%2Fc%3A%2Fworkspaces%2Fws-b');
+
+  // VM test 5: connectWebSocket().onmessage promotes child-uuid-1 -> parent-uuid-9 on SYNC_SNAPSHOT
+  const wsFnMatch = appJs.match(/function connectWebSocket\(\)\s*\{[\s\S]*?\n\s{2}\}/);
+  assert.ok(wsFnMatch, 'app.js must define connectWebSocket()');
+  let capturedWs = null;
+  class FakeWebSocket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    constructor(url) {
+      this.url = url;
+      this.readyState = 1;
+      capturedWs = this;
+    }
+    close() {}
+  }
+  const wsSb = {
+    WebSocket: FakeWebSocket,
+    URLSearchParams,
+    clearTimeout: () => {},
+    setTimeout: () => 0,
+    startFallbackPoll: () => {},
+    stopFallbackPoll: () => {},
+    renderHeaderAndVisibility: () => {},
+    renderAll: () => {},
+    refreshStatus: () => {},
+    applySnapshot: snapSb.__apply,
+    state: snapSb.state,
+  };
+  wsSb.state.activeConvId = 'child-uuid-1';
+  wsSb.state.userPinnedConv = false;
+  wsSb.state.hasSession = false;
+  wsSb.state.lastSeenSeq = 0;
+  wsSb.state.ws = null;
+  vm.runInNewContext(`${wsFnMatch[0]}\nconnectWebSocket();`, wsSb);
+  assert.ok(capturedWs && typeof capturedWs.onmessage === 'function');
+  capturedWs.onmessage({
+    data: JSON.stringify({
+      type: 'SYNC_SNAPSHOT',
+      convId: 'parent-uuid-9',
+      parentConvId: 'parent-uuid-9',
+      hasSession: true,
+      seq: 12,
+      generation: 'g2',
+      conversationsList: [{ id: 'parent-uuid-9', project: 'Live WS Case' }],
+      snapshot: { thinkTank: { project: 'Live WS Case', status: 'ACTIVE' } },
+    }),
+  });
+  assert.equal(wsSb.state.activeConvId, 'parent-uuid-9');
+  assert.equal(wsSb.state.hasSession, true);
+  assert.equal(wsSb.state.project, 'Live WS Case');
+  assert.equal(wsSb.state.conversations.length, 1);
+});

@@ -20,17 +20,54 @@ let backendStartup = null;
 
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
+function normalizeWorkspaceUri(raw) {
+  const src = Array.isArray(raw) ? raw.find((item) => typeof item === 'string' && item.trim()) : raw;
+  if (typeof src !== 'string' || !src.trim()) return '';
+  let val = src.trim();
+  if (val.toLowerCase().startsWith('file://')) {
+    try { val = decodeURIComponent(val); } catch (_) {}
+  } else if (/^[A-Za-z]:[\\/]/.test(val)) {
+    val = `file:///${val.replace(/\\/g, '/')}`;
+  } else if (val.startsWith('/')) {
+    val = `file://${val}`;
+  }
+  val = val.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (process.platform === 'win32' || /^file:\/\/\/[A-Za-z]:/i.test(val)) {
+    val = val.replace(/^(file:\/\/\/)([A-Za-z]):/i, (_, p, d) => `${p}${d.toLowerCase()}:`);
+    if (process.platform === 'win32') val = val.toLowerCase();
+  }
+  return val;
+}
+
 function getActiveSessionContext() {
-  const configDir = join(process.env.USERPROFILE || process.env.HOME || homedir(), '.gemini', 'config');
-  let cid = app.config?.conversationId || '';
+  const workspaceUri = typeof normalizeWorkspaceUri === 'function' ? normalizeWorkspaceUri(arguments[0]) : '';
+  const configDir = (process.env.GEMINI_CONFIG_DIR || '').trim()
+    || join(process.env.USERPROFILE || process.env.HOME || homedir(), '.gemini', 'config');
+  const envCid = String(app.config?.conversationId || '').trim();
+  let cid = envCid && envCid !== 'default' ? envCid : '';
   let pid = app.config?.projectId || '';
+  let workspaceMatched = true;
   if (!cid) {
     try {
       const activeFile = join(configDir, 'active_antigravity_session.json');
       if (existsSync(activeFile)) {
         const d = JSON.parse(readFileSync(activeFile, 'utf8'));
-        cid = String(d?.parentConversationId || d?.conversationId || '').trim();
-        pid = d?.projectId || pid;
+        const wsEntry = workspaceUri && d?.sessionsByWorkspace?.[workspaceUri];
+        if (wsEntry && wsEntry.conversationId) {
+          cid = String(wsEntry.conversationId).trim();
+          pid = wsEntry.projectId || pid;
+        } else {
+          const activeWs = typeof normalizeWorkspaceUri === 'function'
+            ? normalizeWorkspaceUri(d?.workspaceUri || '')
+            : '';
+          if (workspaceUri && activeWs && activeWs !== workspaceUri) {
+            cid = '';
+            workspaceMatched = false;
+          } else {
+            cid = String(d?.parentConversationId || d?.conversationId || '').trim();
+            pid = d?.projectId || pid;
+          }
+        }
       }
     } catch (_) {}
   }
@@ -44,7 +81,7 @@ function getActiveSessionContext() {
       }
     } catch (_) {}
   }
-  return { conversationId: cid, convId: cid, projectId: pid };
+  return { conversationId: cid, convId: cid, projectId: pid, workspaceUri, workspaceMatched };
 }
 
 // 1. Root and Core Static Assets
@@ -59,11 +96,10 @@ const serveRoot = () => {
       convId: ${JSON.stringify(hostCid)},
       projectId: ${JSON.stringify(hostPid)}
     };
-    window.sidecar = Object.assign(window.sidecar || {}, {
-      conversationId: ${JSON.stringify(hostCid)},
-      convId: ${JSON.stringify(hostCid)},
-      projectId: ${JSON.stringify(hostPid)}
-    });
+    window.sidecar = window.sidecar || {};
+    if (!window.sidecar.conversationId && ${JSON.stringify(hostCid)}) window.sidecar.conversationId = ${JSON.stringify(hostCid)};
+    if (!window.sidecar.convId && (window.sidecar.conversationId || ${JSON.stringify(hostCid)})) window.sidecar.convId = window.sidecar.conversationId || ${JSON.stringify(hostCid)};
+    if (!window.sidecar.projectId && ${JSON.stringify(hostPid)}) window.sidecar.projectId = ${JSON.stringify(hostPid)};
   </script>`;
   return new Response(html.replace('</head>', `${injection}\n</head>`), {
     headers: {
@@ -163,8 +199,19 @@ app.api('/api/roles', () => ({ roles: roleCatalog }), 'GET');
 app.api('/roles', () => ({ roles: roleCatalog }), 'GET');
 
 // 5. Host Context
-app.api('/api/host/context', () => getActiveSessionContext(), 'GET');
-app.api('/host/context', () => getActiveSessionContext(), 'GET');
+const resolveHostContextHandler = async (data) => {
+  const wsUri = normalizeWorkspaceUri(data?.workspaceUri || data?.workspace || '');
+  const envCid = String(app.config?.conversationId || '').trim();
+  if (envCid && envCid !== 'default' && !wsUri) return getActiveSessionContext(wsUri);
+  const query = wsUri ? `?workspaceUri=${encodeURIComponent(wsUri)}` : '';
+  const live = await forward(`/host/context${query}`, 'GET');
+  if (live && !live.error && live.status !== 'offline' && 'conversationId' in live) {
+    return { ...live, convId: live.conversationId || '' };
+  }
+  return getActiveSessionContext(wsUri);
+};
+app.api('/api/host/context', resolveHostContextHandler, 'GET');
+app.api('/host/context', resolveHostContextHandler, 'GET');
 
 // 6. Backend Forwarding
 async function forward(path, method, data) {
@@ -259,28 +306,39 @@ async function ensureBackendRunning() {
 
 // 7. GET & Status Query Endpoints
 for (const endpoint of ['/status', '/conversations', '/telemetry']) {
-  app.api(`/api${endpoint}`, async (data) => {
-    const fallbackCid = endpoint === '/status' ? (getActiveSessionContext().conversationId || '') : '';
-    const cid = data?.convId || data?.conversationId || fallbackCid;
-    const query = cid ? `?convId=${encodeURIComponent(cid)}` : '';
+  const handleGetEndpoint = async (data) => {
+    const wsUri = normalizeWorkspaceUri(data?.workspaceUri || data?.workspace || '');
+    const explicitCid = data?.convId || data?.conversationId || '';
+    let cid = explicitCid;
+    if (!cid && endpoint === '/status') {
+      const ctx = getActiveSessionContext(wsUri);
+      cid = ctx.workspaceMatched === false ? 'default' : (ctx.conversationId || '');
+    }
+    const qParts = [];
+    if (cid) qParts.push(`convId=${encodeURIComponent(cid)}`);
+    if (wsUri && endpoint === '/status') qParts.push(`workspaceUri=${encodeURIComponent(wsUri)}`);
+    const query = qParts.length ? `?${qParts.join('&')}` : '';
     return forward(`${endpoint}${query}`, 'GET');
-  }, 'GET');
-  app.api(endpoint, async (data) => {
-    const fallbackCid = endpoint === '/status' ? (getActiveSessionContext().conversationId || '') : '';
-    const cid = data?.convId || data?.conversationId || fallbackCid;
-    const query = cid ? `?convId=${encodeURIComponent(cid)}` : '';
-    return forward(`${endpoint}${query}`, 'GET');
-  }, 'GET');
+  };
+  app.api(`/api${endpoint}`, handleGetEndpoint, 'GET');
+  app.api(endpoint, handleGetEndpoint, 'GET');
 }
 
-app.api('/api/status/query', async (data) => {
-  const cid = data?.convId || data?.conversationId || getActiveSessionContext().conversationId || '';
-  return forward(`/status${cid ? `?convId=${encodeURIComponent(cid)}` : ''}`, 'POST', { convId: cid });
-}, 'POST');
-app.api('/status/query', async (data) => {
-  const cid = data?.convId || data?.conversationId || getActiveSessionContext().conversationId || '';
-  return forward(`/status${cid ? `?convId=${encodeURIComponent(cid)}` : ''}`, 'POST', { convId: cid });
-}, 'POST');
+const handleStatusQuery = async (data) => {
+  const wsUri = normalizeWorkspaceUri(data?.workspaceUri || data?.workspace || '');
+  let cid = data?.convId || data?.conversationId || '';
+  if (!cid) {
+    const ctx = getActiveSessionContext(wsUri);
+    cid = ctx.workspaceMatched === false ? 'default' : (ctx.conversationId || '');
+  }
+  const qParts = [];
+  if (cid) qParts.push(`convId=${encodeURIComponent(cid)}`);
+  if (wsUri) qParts.push(`workspaceUri=${encodeURIComponent(wsUri)}`);
+  const query = qParts.length ? `?${qParts.join('&')}` : '';
+  return forward(`/status${query}`, 'POST', { convId: cid || undefined, workspaceUri: wsUri || undefined });
+};
+app.api('/api/status/query', handleStatusQuery, 'POST');
+app.api('/status/query', handleStatusQuery, 'POST');
 
 // 8. Host Send Message
 app.api('/api/host/send-message', async (data) => {

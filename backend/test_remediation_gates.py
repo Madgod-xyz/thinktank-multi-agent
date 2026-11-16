@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1423,6 +1424,124 @@ class RemediationGatesTests(unittest.TestCase):
         convs_api_ids = {row["id"] for row in convs_api}
         self.assertNotIn(telemetry_only_cid, convs_api_ids)
         self.assertNotIn(legacy_empty_cid, convs_api_ids)
+
+    def test_workspace_scoped_host_context_sync_snapshot_and_cli_alias(self) -> None:
+        ws_b_cid = "bbbbbbbb-1111-2222-3333-444444444444"
+        ws_a_cid = "aaaaaaaa-1111-2222-3333-444444444444"
+        ws_b_uri = "file:///c:/workspaces/project-beta"
+        ws_a_uri = "file:///c:/workspaces/project-alpha"
+
+        # Seed active ThinkTank case bound to workspace B
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                json={"convId": ws_b_cid, "project": "Workspace Beta", "directive": "Blotters", "status": "ACTIVE", "progress": 20},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                json={"conversationId": ws_b_cid, "workspaceUri": ws_b_uri},
+            ).status_code,
+            200,
+        )
+        # Later tool call in Workspace A must NOT hijack Workspace B host/context lookup
+        self.assertEqual(
+            self.client.post(
+                "/api/host/active-session",
+                json={"conversationId": ws_a_cid, "workspaceUri": ws_a_uri},
+            ).status_code,
+            200,
+        )
+        ctx_b = self.client.get("/api/host/context", params={"workspaceUri": "file:///c%3A/workspaces/project-beta/"}).json()
+        self.assertEqual(ctx_b["conversationId"], ws_b_cid)
+        self.assertTrue(ctx_b["hasSession"])
+
+        # Negative cross-workspace test: workspace C must NOT inherit active_conv_id bound to workspace A/B
+        ctx_c = self.client.get("/api/host/context", params={"workspaceUri": "file:///c:/workspaces/project-gamma"}).json()
+        self.assertEqual(ctx_c["conversationId"], "")
+        self.assertFalse(ctx_c["workspaceMatched"])
+        self.assertFalse(ctx_c["hasSession"])
+
+        # Archived --run-1 must carry isArchivedRun and never override active Run #2 in workspace lookup
+        self.assertEqual(
+            self.client.post(
+                "/api/chat/send",
+                json={"convId": ws_b_cid, "channel": "MAIN", "senderCode": "TM", "senderName": "Manager", "senderRole": "team-manager", "content": "Run 1 work"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/task/update",
+                json={"convId": ws_b_cid, "newRun": True, "project": "Workspace Beta Run 2", "directive": "Run 2", "status": "ACTIVE"},
+            ).status_code,
+            200,
+        )
+        self.assertTrue(backend_app.conversations_store[f"{ws_b_cid}--run-1"].get("isArchivedRun"))
+        self.assertEqual(backend_app._resolve_workspace_conv_id(ws_b_uri), ws_b_cid)
+
+        # workspaceUri must be persisted to SQLite sync_store
+        loaded_convs = backend_app.sync_store.load_conversations()
+        self.assertEqual(
+            backend_app._normalize_workspace_key(loaded_convs[ws_b_cid]["snapshot"].get("workspaceUri")),
+            backend_app._normalize_workspace_key(ws_b_uri),
+        )
+
+        # WebSocket SYNC_SNAPSHOT includes hasSession, parentConvId, and conversationsList
+        with self.client.websocket_connect(f"/ws?convId={ws_b_cid}") as ws:
+            ready = ws.receive_json()
+            self.assertEqual(ready["type"], "SYNC_READY")
+            snap_msg = ws.receive_json()
+            self.assertEqual(snap_msg["type"], "SYNC_SNAPSHOT")
+            self.assertEqual(snap_msg["convId"], ws_b_cid)
+            self.assertEqual(snap_msg["parentConvId"], ws_b_cid)
+            self.assertTrue(snap_msg["hasSession"])
+            self.assertTrue(any(row["id"] == ws_b_cid for row in snap_msg["conversationsList"]))
+
+        # Hook record_active_session records sessionsByWorkspace without storing workspace URI into projectId
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sess_file = tmp / "active_antigravity_session.json"
+            with patch.dict(
+                os.environ,
+                {"THINKTANK_SESSION_FILE": str(sess_file), "THINKTANK_ANTIGRAVITY_BRAIN_DIR": str(tmp / "brain")},
+            ), patch.object(hook_bridge, "_post_active_session"):
+                hook_bridge.record_active_session(ws_b_cid, {"workspace": ws_b_uri})
+                hook_bridge.record_active_session(ws_a_cid, {"workspace": ws_a_uri, "projectId": "proj-alpha"})
+            saved = json.loads(sess_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["conversationId"], ws_a_cid)
+            self.assertEqual(saved["projectId"], "proj-alpha")
+            self.assertIsNone(saved["sessionsByWorkspace"][hook_bridge._normalize_workspace_uri(ws_b_uri)]["projectId"])
+            self.assertEqual(
+                saved["sessionsByWorkspace"][hook_bridge._normalize_workspace_uri(ws_b_uri)]["conversationId"],
+                ws_b_cid,
+            )
+            # Unpersisted active_antigravity_session.json workspaceUri must still block cross-workspace fallback
+            unpersisted_cid = "cccccccc-1111-2222-3333-444444444444"
+            sess_file.write_text(
+                json.dumps({"conversationId": unpersisted_cid, "workspaceUri": ws_a_uri, "sessionsByWorkspace": {}}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"THINKTANK_SESSION_FILE": str(sess_file)}):
+                ctx_other = self.client.get("/api/host/context", params={"workspaceUri": "file:///c:/workspaces/project-delta"}).json()
+                self.assertEqual(ctx_other["conversationId"], "")
+                self.assertFalse(ctx_other["workspaceMatched"])
+                st_other = self.client.get("/api/status", params={"workspaceUri": "file:///c:/workspaces/project-delta"}).json()
+                self.assertEqual(st_other["convId"], "default")
+                self.assertFalse(st_other["hasSession"])
+
+        # CLI update-agent accepts 'agent-state' alias cleanly
+        proc = subprocess.run(
+            [sys.executable, str(TOOLS_DIR / "thinktank_bridge.py"), "agent-state", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("--id", proc.stdout)
+
 
 
 if __name__ == "__main__":

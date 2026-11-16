@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import re
 import time
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
@@ -171,7 +172,35 @@ default_collaborations_store = []
 conversations_store: Dict[str, Dict[str, Any]] = {}
 subagent_session_map: Dict[str, Dict[str, Any]] = {}
 pending_subagent_invokes: Dict[str, List[Dict[str, Any]]] = {}
+sessions_by_workspace: Dict[str, Dict[str, Any]] = {}
 active_conv_id = "default"
+active_conv_workspace_uri: Optional[str] = None
+
+
+def _normalize_workspace_key(raw: Any) -> Optional[str]:
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            norm = _normalize_workspace_key(item)
+            if norm:
+                return norm
+        return None
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip()
+    if not val:
+        return None
+    if val.lower().startswith("file://"):
+        val = urllib.parse.unquote(val)
+    elif re.match(r"^[A-Za-z]:[\\/]", val):
+        val = "file:///" + val.replace("\\", "/")
+    elif val.startswith("/"):
+        val = "file://" + val
+    val = val.replace("\\", "/").rstrip("/")
+    if os.name == "nt" or re.match(r"^file:///[A-Za-z]:", val, re.I):
+        val = re.sub(r"^(file:///)([A-Za-z]):", lambda m: m.group(1) + m.group(2).lower() + ":", val)
+        if os.name == "nt":
+            val = val.lower()
+    return val or None
 
 def create_empty_conversation(cid: str) -> Dict[str, Any]:
     conv: Dict[str, Any] = {
@@ -1091,6 +1120,14 @@ def load_persisted_state():
             active_conv_id = subagent_session_map[active_conv_id]["parentConvId"]
         if active_conv_id not in conversations_store:
             active_conv_id = next(iter(conversations_store), "default")
+        for cid, snapshot in sorted(conversations_store.items(), key=lambda kv: get_conv_sort_ts(kv[1])):
+            norm_ws = _normalize_workspace_key(snapshot.get("workspaceUri"))
+            if norm_ws and cid != "default" and "--run-" not in cid and not snapshot.get("isArchivedRun"):
+                sessions_by_workspace[norm_ws] = {
+                    "conversationId": cid,
+                    "projectId": snapshot.get("projectId"),
+                    "timestamp": get_conv_sort_ts(snapshot),
+                }
         active = get_or_create_conversation(active_conv_id)
         return active["thinkTank"], active["proposal"], active["agents"], active["messages"], active["telemetry"], active["collaborations"]
 
@@ -1215,9 +1252,14 @@ class ConnectionManager:
                         })
                         return
                 snapshot = sync_store.snapshot(conv_id) or conv
+                pstate = _sync_pipeline_fields(conv)
                 await self._send(websocket, {
                     "type": "SYNC_SNAPSHOT",
                     "convId": conv_id,
+                    "parentConvId": conv.get("parentConvId") or conv_id.split("--run-")[0],
+                    "hasSession": pstate["hasSession"],
+                    "isClosed": pstate["isClosed"],
+                    "conversationsList": _build_conversations_list(conv_id, include_target_if_in_store=conv_id in conversations_store),
                     "generation": cursor["generation"],
                     "seq": cursor["seq"],
                     "updatedAt": cursor["updated_at"],
@@ -1425,20 +1467,76 @@ def _build_conv_row(cid: str, c: Dict[str, Any], target_cid: str) -> Dict[str, A
 
 
 def _refresh_active_conv_id_from_file() -> None:
-    global active_conv_id
+    global active_conv_id, active_conv_workspace_uri
     active_file = _resolve_active_session_file()
     if active_file and os.path.exists(active_file):
         try:
             with open(active_file, "r", encoding="utf-8") as f:
                 sdata = json.load(f)
+                raw_ws_map = sdata.get("sessionsByWorkspace")
+                if isinstance(raw_ws_map, dict):
+                    for ws_k, ws_info in raw_ws_map.items():
+                        norm_k = _normalize_workspace_key(ws_k)
+                        if not norm_k or not isinstance(ws_info, dict):
+                            continue
+                        ws_cid = str(ws_info.get("conversationId") or "").strip()
+                        if ws_cid:
+                            mapped_ws = _ensure_subagent_mapping(ws_cid)
+                            resolved_ws_cid = mapped_ws["parentConvId"] if mapped_ws else ws_cid
+                            prev_ts = float((sessions_by_workspace.get(norm_k) or {}).get("timestamp") or 0.0)
+                            cand_ts = float(ws_info.get("timestamp") or 0.0)
+                            if norm_k not in sessions_by_workspace or cand_ts >= prev_ts:
+                                sessions_by_workspace[norm_k] = {
+                                    "conversationId": resolved_ws_cid,
+                                    "projectId": ws_info.get("projectId"),
+                                    "timestamp": cand_ts,
+                                }
                 raw_cid = str(sdata.get("conversationId") or "").strip()
                 if raw_cid:
                     mapped = _ensure_subagent_mapping(raw_cid)
                     if mapped:
                         raw_cid = mapped["parentConvId"]
                     active_conv_id = raw_cid
+                    active_conv_workspace_uri = _normalize_workspace_key(sdata.get("workspaceUri"))
         except Exception:
             pass
+
+
+def _resolve_workspace_conv_id(workspace_uri: Optional[str]) -> Optional[str]:
+    norm_ws = _normalize_workspace_key(workspace_uri)
+    if not norm_ws:
+        return None
+    # Prefer the most recently active meaningful ThinkTank session bound to this workspace.
+    ws_candidates = [
+        (cid, c) for cid, c in conversations_store.items()
+        if cid != "default"
+        and "--run-" not in cid
+        and not c.get("isArchivedRun")
+        and _normalize_workspace_key(c.get("workspaceUri")) == norm_ws
+        and has_thinktank_activity(c)
+    ]
+    ws_entry = sessions_by_workspace.get(norm_ws)
+    if ws_entry and ws_entry.get("conversationId"):
+        mapped_cid = str(ws_entry["conversationId"])
+        if "--run-" not in mapped_cid and mapped_cid in conversations_store and has_thinktank_activity(conversations_store[mapped_cid]):
+            return mapped_cid
+    if ws_candidates:
+        ws_candidates.sort(key=lambda kv: get_conv_sort_ts(kv[1]), reverse=True)
+        return ws_candidates[0][0]
+    if ws_entry and ws_entry.get("conversationId"):
+        mapped_cid = str(ws_entry["conversationId"])
+        if "--run-" not in mapped_cid:
+            return mapped_cid
+    return None
+
+
+def _valid_project_id_str(raw: Any) -> Optional[str]:
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip()
+    if not val or len(val) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", val):
+        return None
+    return val
 
 
 def _build_conversations_list(target_cid: str, *, include_target_if_in_store: bool = False) -> List[Dict[str, Any]]:
@@ -1461,7 +1559,7 @@ def _build_conversations_list(target_cid: str, *, include_target_if_in_store: bo
 
 @app.post("/api/host/active-session")
 async def set_active_session(payload: Dict[str, Any] = Body(...)):
-    global active_conv_id
+    global active_conv_id, active_conv_workspace_uri
     raw_cid = payload.get("conversationId")
     if raw_cid and isinstance(raw_cid, str):
         raw_cid = raw_cid.strip()
@@ -1474,9 +1572,22 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
         cid = mapped["parentConvId"] if mapped else raw_cid
         active_conv_id = cid
         conv = get_or_create_conversation(cid)
-        pid = payload.get("projectId")
-        if pid and isinstance(pid, str):
-            conv["projectId"] = pid.strip()
+        pid = _valid_project_id_str(payload.get("projectId"))
+        meta_dirty = False
+        if pid and not conv.get("projectId"):
+            conv["projectId"] = pid
+            meta_dirty = True
+        norm_ws = _normalize_workspace_key(payload.get("workspaceUri") or payload.get("workspace"))
+        active_conv_workspace_uri = norm_ws or _normalize_workspace_key(conv.get("workspaceUri"))
+        if norm_ws:
+            if conv.get("workspaceUri") != norm_ws:
+                conv["workspaceUri"] = norm_ws
+                meta_dirty = True
+            sessions_by_workspace[norm_ws] = {
+                "conversationId": cid,
+                "projectId": conv.get("projectId"),
+                "timestamp": time.time(),
+            }
         agent_updated = False
         if mapped:
             tt = conv.get("thinkTank") or {}
@@ -1491,6 +1602,15 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
                     subagent_conv_id=raw_cid,
                     verified_subagent=True,
                 )
+        if meta_dirty or agent_updated:
+            sync_store.commit(
+                conversation_id=cid,
+                event_id=f"host-session-{cid}-{uuid.uuid4().hex[:8]}",
+                event_type="HOST_SESSION_UPDATED",
+                payload={"convId": cid, "workspaceUri": conv.get("workspaceUri"), "projectId": conv.get("projectId")},
+                snapshot=conv,
+                source="host-session",
+            )
         save_persisted_state()
         if agent_updated:
             await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
@@ -1498,16 +1618,37 @@ async def set_active_session(payload: Dict[str, Any] = Body(...)):
     return {"status": "error", "message": "Invalid conversationId"}
 
 
+def _resolve_session_for_workspace(workspace_uri: Optional[str]) -> tuple[str, bool, Optional[str]]:
+    _refresh_active_conv_id_from_file()
+    norm_ws = _normalize_workspace_key(workspace_uri)
+    ws_cid = _resolve_workspace_conv_id(norm_ws) if norm_ws else None
+    if norm_ws:
+        if ws_cid:
+            return ws_cid, True, norm_ws
+        active_ws = _normalize_workspace_key(
+            (conversations_store.get(active_conv_id) or {}).get("workspaceUri") or active_conv_workspace_uri
+        )
+        if active_ws and active_ws != norm_ws:
+            return "", False, norm_ws
+        if active_conv_id and active_conv_id != "default" and not active_ws:
+            return active_conv_id, True, norm_ws
+        return "", False, norm_ws
+    return active_conv_id, True, None
+
+
 @app.get("/api/host/active-session")
 @app.get("/api/host/context")
-def get_active_session():
-    _refresh_active_conv_id_from_file()
-    conv = conversations_store.get(active_conv_id, {})
+def get_active_session(workspaceUri: Optional[str] = Query(None)):
+    resolved_cid, ws_matched, norm_ws = _resolve_session_for_workspace(workspaceUri)
+    conv = conversations_store.get(resolved_cid, {}) if resolved_cid else {}
     return {
-        "conversationId": active_conv_id,
+        "conversationId": resolved_cid,
+        "workspaceUri": norm_ws or conv.get("workspaceUri"),
+        "workspaceMatched": ws_matched,
         "projectId": conv.get("projectId"),
-        "project": conv.get("thinkTank", {}).get("project"),
-        "status": conv.get("thinkTank", {}).get("status", "ACTIVE"),
+        "project": (conv.get("thinkTank") or {}).get("project"),
+        "status": (conv.get("thinkTank") or {}).get("status", "DISCONNECTED" if not resolved_cid else "ACTIVE"),
+        "hasSession": has_thinktank_activity(conv),
     }
 
 
@@ -1580,22 +1721,23 @@ def _build_status_payload(target_cid: str) -> Dict[str, Any]:
 
 @app.get("/api/status")
 @app.get("/status")
-def get_status(convId: Optional[str] = Query(None), conv_id: Optional[str] = Query(None)):
+def get_status(convId: Optional[str] = Query(None), conv_id: Optional[str] = Query(None), workspaceUri: Optional[str] = Query(None)):
     explicit_cid = (convId or conv_id or "").strip()
     if explicit_cid:
         return _build_status_payload(explicit_cid)
 
-    _refresh_active_conv_id_from_file()
-    target_cid = active_conv_id or "default"
+    resolved_cid, ws_matched, _ = _resolve_session_for_workspace(workspaceUri)
+    target_cid = resolved_cid if (ws_matched and resolved_cid) else "default"
     return _build_status_payload(target_cid)
 
 
 @app.post("/api/status")
 @app.post("/status")
-def post_status(payload: Optional[Dict[str, Any]] = Body(None), convId: Optional[str] = Query(None), conv_id: Optional[str] = Query(None)):
+def post_status(payload: Optional[Dict[str, Any]] = Body(None), convId: Optional[str] = Query(None), conv_id: Optional[str] = Query(None), workspaceUri: Optional[str] = Query(None)):
     body_cid = str((payload or {}).get("convId") or (payload or {}).get("conversationId") or (payload or {}).get("conv_id") or "").strip()
+    body_ws = str((payload or {}).get("workspaceUri") or (payload or {}).get("workspace") or "").strip()
     query_cid = (convId or conv_id or "").strip()
-    return get_status(convId=query_cid or body_cid or None)
+    return get_status(convId=query_cid or body_cid or None, workspaceUri=workspaceUri or body_ws or None)
 
 
 def upsert_agent_state(
@@ -1883,6 +2025,7 @@ def _archive_conversation_run(base_cid: str, conv: Dict[str, Any]) -> Optional[s
     archived_conv = copy.deepcopy(conv)
     archived_conv["id"] = archived_id
     archived_conv["parentConvId"] = base_cid
+    archived_conv["isArchivedRun"] = True
     archived_tt = archived_conv.setdefault("thinkTank", dict(default_think_tank_state))
     archived_tt["runIndex"] = run_idx
     archived_tt["isClosed"] = True

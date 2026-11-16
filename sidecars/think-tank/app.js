@@ -102,6 +102,7 @@
   const state = {
     activeConvId: null,
     hostConvId: null,
+    workspaceUri: '',
     pinnedConvId: null,
     userPinnedConv: false,
     convSearchQuery: '',
@@ -157,6 +158,7 @@
     ws: null,
     reconnectTimer: null,
     pollTimer: null,
+    hostContextTimer: null,
     toastTimer: null,
   };
 
@@ -435,11 +437,19 @@
 
   function resolveHostConvId(ctx) {
     const params = new URLSearchParams(window.location.search);
-    const paramCid = params.get('convId') || params.get('conversationId');
-    if (paramCid && paramCid.trim()) return paramCid.trim();
+    const explicitDeepLink = params.get('convId');
+    if (explicitDeepLink && explicitDeepLink.trim()) return explicitDeepLink.trim();
+
+    if (ctx && typeof ctx === 'object' && ('conversationId' in ctx || 'convId' in ctx)) {
+      const liveCid = String(ctx.conversationId || ctx.convId || '').trim();
+      if (liveCid && liveCid !== 'default') return liveCid;
+      if (ctx.workspaceMatched === false) return '';
+    }
+
+    const urlConvId = params.get('conversationId');
+    if (urlConvId && urlConvId.trim() && urlConvId.trim() !== 'default') return urlConvId.trim();
+
     const candidates = [
-      ctx?.conversationId,
-      ctx?.convId,
       window.__ANTIGRAVITY_HOST_CONTEXT__?.conversationId,
       window.__ANTIGRAVITY_HOST_CONTEXT__?.convId,
       window.sidecar?.conversationId,
@@ -452,8 +462,12 @@
   }
 
   async function fetchStatusForConv(cid) {
-    const target = cid || state.activeConvId || '';
-    const qs = target ? `?convId=${encodeURIComponent(target)}` : '';
+    const rawTarget = (cid || state.activeConvId || '').trim();
+    const target = rawTarget || (state.workspaceUri ? 'default' : '');
+    const params = new URLSearchParams();
+    if (target) params.set('convId', target);
+    if (state.workspaceUri) params.set('workspaceUri', state.workspaceUri);
+    const qs = params.toString() ? `?${params.toString()}` : '';
     return apiGet(`/api/status${qs}`);
   }
 
@@ -577,12 +591,26 @@
     return false;
   }
 
-  function applySnapshot(data) {
+  function applySnapshot(data, requestedCid = null) {
     if (!data || typeof data !== 'object') return;
-    if (data.convId && state.activeConvId && data.convId !== state.activeConvId && !state.userPinnedConv) return;
-    if (data.convId && !state.activeConvId) state.activeConvId = data.convId;
+    const isWildcardActive = !state.activeConvId || state.activeConvId === 'default';
+    const isParentResolved = Boolean(requestedCid && requestedCid === state.activeConvId && data.convId && data.convId === data.parentConvId);
+    if (data.convId && !isWildcardActive && data.convId !== state.activeConvId && !state.userPinnedConv && !isParentResolved) return;
+    if (data.convId && (isWildcardActive || (!state.userPinnedConv && isParentResolved))) state.activeConvId = data.convId;
 
     const tt = data.thinkTank || {};
+    const incomingSyncSeq = Number(data.sync?.seq || 0);
+    const incomingRunIdx = Number(tt.runIndex ?? data.runIndex ?? 1);
+    if (
+      data.convId
+      && data.convId === state.activeConvId
+      && incomingSyncSeq > 0
+      && state.lastSeenSeq > 0
+      && incomingSyncSeq < state.lastSeenSeq
+      && incomingRunIdx <= Number(state.runIndex || 1)
+    ) {
+      return;
+    }
     const snapKey = JSON.stringify({
       c: data.convId || state.activeConvId || '',
       hs: data.hasSession,
@@ -744,6 +772,29 @@
     if (devMeta) devMeta.classList.toggle('hidden', !state.devMode);
     const convBadge = $('#empty-conv-badge');
     if (convBadge) convBadge.textContent = state.activeConvId || '—';
+
+    const emptySessionsEl = $('#empty-active-sessions');
+    if (emptySessionsEl) {
+      const choices = state.conversations.filter((c) => c && c.id && c.id !== 'default').slice(0, 6);
+      const showChoices = !state.hasSession && choices.length > 0;
+      emptySessionsEl.classList.toggle('hidden', !showChoices);
+      if (showChoices) {
+        const eSig = choices.map((c) => `${c.id}:${c.project || ''}:${c.isClosed ? 1 : 0}:${c.runIndex || 1}`).join('|') + `::${state.language}`;
+        if (emptySessionsEl.dataset.sig !== eSig) {
+          emptySessionsEl.dataset.sig = eSig;
+          emptySessionsEl.innerHTML = `<div class="empty-sessions-title">${esc(tKey('empty.activeSessionsTitle'))}</div>`
+            + choices.map((c) => {
+              const title = c.project && c.project !== 'مکالمه جاری' ? c.project : tKey('header.currentSession');
+              const runTag = Number(c.runIndex || 1) > 1 ? ` #${num(c.runIndex)}` : '';
+              const statusText = c.isClosed ? tKey('header.caseClosed') : tKey('header.caseOpen');
+              return `<button type="button" class="empty-session-item" data-switch-conv="${esc(c.id)}">
+                <span class="empty-session-item-name">${esc(title)}${esc(runTag)}</span>
+                <span class="empty-session-item-meta">${esc(statusText)}</span>
+              </button>`;
+            }).join('');
+        }
+      }
+    }
 
     const dot = $('#ws-status-dot');
     const lbl = $('#ws-status-label');
@@ -2273,6 +2324,19 @@
     }
   }
 
+  function getHostContextPath() {
+    return state.workspaceUri
+      ? `/api/host/context?workspaceUri=${encodeURIComponent(state.workspaceUri)}`
+      : '/api/host/context';
+  }
+
+  function startHostContextWatch() {
+    if (state.hostContextTimer) return;
+    state.hostContextTimer = setInterval(() => {
+      if (!state.userPinnedConv) syncHostContextOnly();
+    }, 3000);
+  }
+
   function startFallbackPoll() {
     if (state.pollTimer) return;
     state.pollTimer = setInterval(syncWithHostAndStatus, 5000);
@@ -2285,26 +2349,77 @@
     }
   }
 
-  async function syncWithHostAndStatus() {
-    try {
-      const ctx = await apiGet('/api/host/context').catch(() => null);
-      const liveHostCid = resolveHostConvId(ctx);
-      if (liveHostCid && liveHostCid !== state.hostConvId) {
-        state.hostConvId = liveHostCid;
-        if (!state.userPinnedConv && liveHostCid !== state.activeConvId) {
-          await switchConversation(liveHostCid, false);
-          return;
+  let hostSyncInFlight = null;
+  async function syncHostContextOnly(forceNotify = false) {
+    if (hostSyncInFlight) return hostSyncInFlight;
+    hostSyncInFlight = (async () => {
+      try {
+        const ctx = await apiGet(getHostContextPath()).catch(() => null);
+        const liveHostCid = resolveHostConvId(ctx);
+        if (liveHostCid) {
+          const changed = liveHostCid !== state.hostConvId;
+          state.hostConvId = liveHostCid;
+          if (!state.userPinnedConv && liveHostCid !== state.activeConvId) {
+            await switchConversation(liveHostCid, false);
+            return true;
+          }
+          if ((changed || ctx?.hasSession) && !state.hasSession && liveHostCid === state.activeConvId) {
+            await refreshStatus();
+            return true;
+          }
+        } else if (ctx && ctx.workspaceMatched === false && !state.userPinnedConv && state.activeConvId) {
+          state.hostConvId = '';
+          state.activeConvId = '';
+          resetConversationViewState();
+          renderAll();
         }
+        if (forceNotify) toast(tKey('empty.syncNoMatch'));
+      } catch (_) {
+        if (forceNotify) toast(tKey('empty.syncNoMatch'));
       }
-    } catch (_) {}
-    await refreshStatus();
+      return false;
+    })();
+    try {
+      return await hostSyncInFlight;
+    } finally {
+      hostSyncInFlight = null;
+    }
+  }
+
+  async function syncWithHostAndStatus() {
+    const switched = await syncHostContextOnly(false);
+    if (!switched) await refreshStatus();
   }
 
   async function refreshStatus() {
+    const requestedCid = state.activeConvId || '';
     try {
-      const data = await fetchStatusForConv(state.activeConvId);
-      applySnapshot(data);
-    } catch (_) {}
+      const data = await fetchStatusForConv(requestedCid);
+      applySnapshot(data, requestedCid);
+    } catch (err) {
+      if (err && Number(err.status) === 403) {
+        if (state.ws) {
+          const prevWs = state.ws;
+          state.ws = null;
+          try { prevWs.close(); } catch (_) {}
+        }
+        state.userPinnedConv = false;
+        state.pinnedConvId = null;
+        state.activeConvId = state.hostConvId && state.hostConvId !== requestedCid ? state.hostConvId : '';
+        resetConversationViewState();
+        renderHeaderAndVisibility();
+      }
+      try {
+        const listData = await apiGet('/api/conversations');
+        if (Array.isArray(listData?.conversations)) {
+          state.conversations = listData.conversations;
+          renderHeaderAndVisibility();
+        }
+      } catch (_) {}
+      if (err && Number(err.status) === 403 && err.message) {
+        toast(err.message);
+      }
+    }
   }
 
   function applyIncrementalWsMsg(msg) {
@@ -2368,6 +2483,7 @@
   function connectWebSocket() {
     if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
     const convId = state.activeConvId || 'default';
+    const requestedWsCid = convId;
     try {
       const params = new URLSearchParams({ convId });
       if (state.wsGeneration && state.lastSeenSeq > 0) {
@@ -2386,17 +2502,41 @@
         if (state.ws !== ws) return;
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.convId && state.activeConvId && msg.convId !== state.activeConvId) return;
+          const isWildcardActive = !state.activeConvId || state.activeConvId === 'default';
+          const isWsParentResolved = Boolean(
+            !state.userPinnedConv
+            && requestedWsCid
+            && requestedWsCid === state.activeConvId
+            && msg.convId
+            && msg.parentConvId
+            && msg.convId === msg.parentConvId
+          );
+          if (msg.convId && !isWildcardActive && msg.convId !== state.activeConvId && msg.parentConvId !== state.activeConvId && !isWsParentResolved) return;
+          if (isWsParentResolved && msg.convId !== state.activeConvId) {
+            state.activeConvId = msg.convId;
+          }
           if (msg.generation) state.wsGeneration = msg.generation;
 
           if (msg.type === 'SYNC_READY') {
-            if (Number(msg.seq || 0) > state.lastSeenSeq) refreshStatus();
+            if (Number(msg.seq || 0) > state.lastSeenSeq || !state.hasSession) refreshStatus();
             return;
           }
           if (msg.type === 'SYNC_SNAPSHOT') {
             if (msg.seq) state.lastSeenSeq = Number(msg.seq);
-            if (msg.snapshot) applySnapshot(msg.snapshot);
-            else refreshStatus();
+            if (Array.isArray(msg.conversationsList)) state.conversations = msg.conversationsList;
+            if (msg.snapshot) {
+              applySnapshot({
+                ...msg.snapshot,
+                convId: msg.convId || msg.snapshot.id || msg.snapshot.convId,
+                parentConvId: msg.parentConvId || msg.snapshot.parentConvId || msg.convId,
+                hasSession: typeof msg.hasSession === 'boolean' ? msg.hasSession : msg.snapshot.hasSession,
+                isClosed: typeof msg.isClosed === 'boolean' ? msg.isClosed : msg.snapshot.isClosed,
+                conversationsList: Array.isArray(msg.conversationsList) ? msg.conversationsList : msg.snapshot.conversationsList,
+                sync: { seq: msg.seq, generation: msg.generation },
+              }, requestedWsCid);
+            } else {
+              refreshStatus();
+            }
             return;
           }
           if (msg.type === 'SYNC_REPLAY') {
@@ -2422,7 +2562,7 @@
           if (incomingSeq > state.lastSeenSeq) state.lastSeenSeq = incomingSeq;
 
           if (msg.type === 'SNAPSHOT') {
-            applySnapshot(msg);
+            applySnapshot(msg, requestedWsCid);
           } else if (applyIncrementalWsMsg(msg)) {
             renderAll();
           } else {
@@ -2655,6 +2795,26 @@
       } catch (err) {
         toast(err.message || tKey('app.sendError'));
       }
+    });
+
+    $('#btn-sync-host-session')?.addEventListener('click', async () => {
+      state.userPinnedConv = false;
+      state.pinnedConvId = null;
+      const switched = await syncHostContextOnly(true);
+      if (!switched) await refreshStatus();
+    });
+
+    $('#empty-active-sessions')?.addEventListener('click', async (e) => {
+      const btn = e.target instanceof Element ? e.target.closest('.empty-session-item[data-switch-conv]') : null;
+      if (!btn) return;
+      await switchConversation(btn.dataset.switchConv, true);
+    });
+
+    window.addEventListener('focus', () => {
+      if (!state.userPinnedConv) syncHostContextOnly(false);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && !state.userPinnedConv) syncHostContextOnly(false);
     });
 
     const tabs = $$('.primary-nav .nav-tab');
@@ -3128,9 +3288,30 @@
       else if (Array.isArray(rolesData)) state.roles = rolesData;
     } catch (_) {}
 
+    try {
+      if (window.sidecar?.getWorkspaceUris) {
+        const uris = await Promise.race([
+          window.sidecar.getWorkspaceUris(),
+          new Promise((resolve) => setTimeout(() => resolve([]), 350)),
+        ]);
+        if (Array.isArray(uris) && typeof uris[0] === 'string') {
+          state.workspaceUri = uris[0].trim();
+        }
+      }
+      if (window.sidecar?.onWorkspaceChange) {
+        window.sidecar.onWorkspaceChange((uris) => {
+          const nextUri = Array.isArray(uris) && typeof uris[0] === 'string' ? uris[0].trim() : '';
+          if (nextUri !== state.workspaceUri) {
+            state.workspaceUri = nextUri;
+            if (!state.userPinnedConv) syncHostContextOnly(false);
+          }
+        });
+      }
+    } catch (_) {}
+
     let ctx = null;
     try {
-      ctx = await apiGet('/api/host/context');
+      ctx = await apiGet(getHostContextPath());
     } catch (_) {}
     const initialHostCid = resolveHostConvId(ctx);
     if (initialHostCid) {
@@ -3140,6 +3321,7 @@
 
     await refreshStatus();
     connectWebSocket();
+    startHostContextWatch();
   }
 
   init();

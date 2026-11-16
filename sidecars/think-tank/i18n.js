@@ -32,6 +32,9 @@
       "empty.desc": "با شروع کار چندایجنتی یا واگذاری وظیفه در این گفت‌وگو، پرونده به‌طور خودکار ثبت می‌شود.",
       "empty.convIdLabel": "شناسه گفت‌وگو:",
       "empty.initBtn": "ساخت دستی پرونده",
+      "empty.syncBtn": "همگام‌سازی تب فعال",
+      "empty.activeSessionsTitle": "پرونده‌های فعال یا اخیر",
+      "empty.syncNoMatch": "پرونده فعالی برای این تب پیدا نشد.",
 
       "nav.ariaLabel": "نماهای پرونده",
       "nav.flow": "جریان",
@@ -318,6 +321,9 @@
       "empty.desc": "A case is created automatically when multi-agent orchestration or task delegation starts in this conversation.",
       "empty.convIdLabel": "Conversation ID:",
       "empty.initBtn": "Create Case Manually",
+      "empty.syncBtn": "Sync Active Tab",
+      "empty.activeSessionsTitle": "Active or Recent Cases",
+      "empty.syncNoMatch": "No active case found for this tab.",
 
       "nav.ariaLabel": "Case views",
       "nav.flow": "Flow",

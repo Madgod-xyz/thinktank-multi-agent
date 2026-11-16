@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
-import urllib.error
-import urllib.request
 from typing import Any
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 API_URL = "http://127.0.0.1:8780/api/telemetry/host_tool"
@@ -294,27 +296,147 @@ def _post_active_session(data: dict[str, Any], event_key: str) -> None:
         pass
 
 
+def _normalize_workspace_uri(raw: Any) -> str | None:
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            norm = _normalize_workspace_uri(item)
+            if norm:
+                return norm
+        return None
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip()
+    if not val:
+        return None
+    if val.lower().startswith("file://"):
+        val = urllib.parse.unquote(val)
+    elif re.match(r"^[A-Za-z]:[\\/]", val):
+        val = "file:///" + val.replace("\\", "/")
+    elif val.startswith("/"):
+        val = "file://" + val
+    val = val.replace("\\", "/").rstrip("/")
+    if sys.platform == "win32" or re.match(r"^file:///[A-Za-z]:", val, re.I):
+        val = re.sub(r"^(file:///)([A-Za-z]):", lambda m: m.group(1) + m.group(2).lower() + ":", val)
+        if sys.platform == "win32":
+            val = val.lower()
+    return val or None
+
+
+def _extract_workspace_uri(payload: dict[str, Any], conv_id: str | None = None) -> str | None:
+    for key in ("workspaceUri", "workspaceUris", "workspace", "workspacePath", "cwd"):
+        norm = _normalize_workspace_uri(payload.get(key))
+        if norm:
+            return norm
+    if conv_id and "--run-" not in conv_id:
+        tpath = _resolve_brain_dir() / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if tpath.is_file():
+            try:
+                size = tpath.stat().st_size
+                with tpath.open("rb") as fp:
+                    fp.seek(max(0, size - 65536))
+                    tail = fp.read().decode("utf-8", errors="ignore")
+                matches = re.findall(r'"workspaceUris"\s*:\s*\[\s*"([^"]+)"', tail)
+                if matches:
+                    return _normalize_workspace_uri(matches[-1])
+            except Exception:
+                pass
+    return None
+
+
+def _update_workspace_session_map(
+    existing: dict[str, Any], norm_ws: str | None, conv_id: str, project_id: Any
+) -> dict[str, Any]:
+    raw_map = existing.get("sessionsByWorkspace")
+    ws_map = {str(k): dict(v) for k, v in raw_map.items() if isinstance(v, dict)} if isinstance(raw_map, dict) else {}
+    if norm_ws:
+        ws_map[norm_ws] = {
+            "conversationId": conv_id,
+            "projectId": project_id,
+            "timestamp": time.time(),
+        }
+        if len(ws_map) > 25:
+            ordered = sorted(ws_map.items(), key=lambda kv: float(kv[1].get("timestamp") or 0), reverse=True)[:25]
+            ws_map = dict(ordered)
+    return ws_map
+
+
+@contextmanager
+def _session_file_lock(session_file: Path):
+    lock_path = session_file.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fp = None
+    locked = False
+    try:
+        fp = lock_path.open("a+b")
+        deadline = time.monotonic() + 0.35
+        while time.monotonic() < deadline:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    fp.seek(0)
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                time.sleep(0.015)
+        yield
+    finally:
+        if fp is not None:
+            if locked:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        fp.seek(0)
+                        msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            fp.close()
+
+
+def _valid_project_id(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip()
+    if not val or len(val) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", val):
+        return None
+    return val
+
+
 def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None:
     """Record the active Antigravity session without letting child subagents overwrite it."""
     if not conversation_id:
         return
-    project_id = payload.get("projectId") or payload.get("workspace")
+    project_id = _valid_project_id(payload.get("projectId"))
     parent_cid, role_id, role_title = _resolve_parent_context(conversation_id, payload)
+    norm_ws = _extract_workspace_uri(payload, parent_cid or conversation_id)
     session_file = _resolve_session_file()
 
     if parent_cid:
         links = _read_json_dict(_resolve_links_file())
-        existing = _read_json_dict(session_file)
-        existing_cid = _valid_conv_id(existing.get("conversationId"))
-        if not existing_cid or existing_cid == conversation_id or existing_cid in links:
-            _write_json_atomic(
-                session_file,
-                {
-                    "conversationId": parent_cid,
-                    "projectId": project_id or existing.get("projectId"),
-                    "timestamp": time.time(),
-                },
-            )
+        with _session_file_lock(session_file):
+            existing = _read_json_dict(session_file)
+            existing_cid = _valid_conv_id(existing.get("conversationId"))
+            eff_pid = project_id or _valid_project_id(existing.get("projectId"))
+            ws_map = _update_workspace_session_map(existing, norm_ws, parent_cid, eff_pid)
+            if not existing_cid or existing_cid == conversation_id or existing_cid in links or norm_ws:
+                next_data = dict(existing)
+                if not existing_cid or existing_cid == conversation_id or existing_cid in links:
+                    next_data.update({
+                        "conversationId": parent_cid,
+                        "projectId": eff_pid,
+                        "timestamp": time.time(),
+                    })
+                    if norm_ws:
+                        next_data["workspaceUri"] = norm_ws
+                if ws_map:
+                    next_data["sessionsByWorkspace"] = ws_map
+                _write_json_atomic(session_file, next_data)
         _post_active_session(
             {
                 "conversationId": conversation_id,
@@ -322,18 +444,24 @@ def record_active_session(conversation_id: str, payload: dict[str, Any]) -> None
                 "roleId": role_id,
                 "roleTitle": role_title,
                 "projectId": project_id,
+                "workspaceUri": norm_ws,
                 "timestamp": time.time(),
             },
             f"{conversation_id}-{parent_cid}",
         )
         return
 
-    data = {
-        "conversationId": conversation_id,
-        "projectId": project_id,
-        "timestamp": time.time(),
-    }
-    _write_json_atomic(session_file, data)
+    with _session_file_lock(session_file):
+        existing = _read_json_dict(session_file)
+        ws_map = _update_workspace_session_map(existing, norm_ws, conversation_id, project_id)
+        data = {
+            "conversationId": conversation_id,
+            "projectId": project_id,
+            "workspaceUri": norm_ws,
+            "timestamp": time.time(),
+            "sessionsByWorkspace": ws_map,
+        }
+        _write_json_atomic(session_file, data)
     _post_active_session(data, conversation_id)
 
 

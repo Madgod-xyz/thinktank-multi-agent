@@ -721,7 +721,7 @@ def main():
     add_conv_id_option(p_msg)
     add_origin_options(p_msg)
 
-    p_ag = subparsers.add_parser("update-agent")
+    p_ag = subparsers.add_parser("update-agent", aliases=["agent-state"])
     p_ag.add_argument("--id", required=True)
     p_ag.add_argument("--task")
     p_ag.add_argument("--tool")
