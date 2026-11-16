@@ -563,4 +563,27 @@ test('F-01, F-03, F-04, F-06: Parent session resolution, WORKING status helper, 
   // F-06: Sequence diagram SVG preserves intrinsic pixel width for horizontal scrolling without shrinking 12px text
   assert.match(appCss, /\.sequence-diagram-canvas svg\s*\{[^}]*width:\s*auto;[^}]*max-width:\s*none;/, '.sequence-diagram-canvas svg must use width: auto; max-width: none;');
   assert.match(appCss, /#swarm-interaction-svg\s*\{[^}]*width:\s*100%;/, '#swarm-interaction-svg must retain width: 100%');
+
+  // Portability: main.mjs resolveBackendPython reads thinktank/runtime.json and respects THINKTANK_PYTHON + platform default
+  const pyMatch = mainMjs.match(/function resolveBackendPython\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(pyMatch, 'main.mjs must define resolveBackendPython()');
+  const pyRuntimeSb = {
+    homedir: () => '/tmp/test-home',
+    join: (...parts) => parts.join('/'),
+    existsSync: (p) => p.endsWith('runtime.json') || p === '/venv/bin/python',
+    readFileSync: () => JSON.stringify({ pythonExecutable: '/venv/bin/python' }),
+    process: { env: {}, platform: 'linux' },
+  };
+  vm.runInNewContext(`${pyMatch[0]}\nthis.__py = resolveBackendPython();`, pyRuntimeSb);
+  assert.equal(pyRuntimeSb.__py, '/venv/bin/python');
+
+  const pyFallbackSb = {
+    homedir: () => '/tmp/test-home',
+    join: (...parts) => parts.join('/'),
+    existsSync: () => false,
+    readFileSync: () => '',
+    process: { env: {}, platform: 'linux' },
+  };
+  vm.runInNewContext(`${pyMatch[0]}\nthis.__py = resolveBackendPython();`, pyFallbackSb);
+  assert.equal(pyFallbackSb.__py, 'python3');
 });

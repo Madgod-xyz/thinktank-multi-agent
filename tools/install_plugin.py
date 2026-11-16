@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portable installer & environment readiness verifier for team-orchestration-director (ThinkTank v2.0).
+Portable installer & environment readiness verifier for team-orchestration-director (ThinkTank v3.0).
 Resolves paths dynamically via Path(__file__) and Path.home(); contains zero hardcoded user paths.
 """
 
@@ -108,7 +108,10 @@ def run_checks(plugin_root: Path, host: str, port: int, require_backend: bool = 
         if importlib.util.find_spec(pkg) is None
     ]
     if missing_py_deps:
-        errors.append(f"Missing Python packages for backend: {', '.join(missing_py_deps)}")
+        errors.append(
+            f"Missing Python packages for backend: {', '.join(missing_py_deps)} "
+            f"(install with: {sys.executable} -m pip install -r backend/requirements.txt)"
+        )
 
     backend_up, backend_msg = check_backend_health(host, port)
     if not backend_up:
@@ -224,6 +227,13 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
         shutil.copytree(runtime_sidecar_src, runtime_sidecar_dst, dirs_exist_ok=True, ignore=_ignore_copy)
         _prune_stale_sidecar_assets(runtime_sidecar_src, runtime_sidecar_dst)
 
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    runtime_meta_path = runtime_root / "runtime.json"
+    runtime_meta_path.write_text(
+        json.dumps({"pythonExecutable": str(Path(sys.executable))}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
     hooks_installed = False
     hooks_error = None
     hooks_config = target_dir / "hooks.json"
@@ -247,6 +257,7 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
         "pluginInstallPath": str(plugin_dest),
         "runtimeBackendPath": str(runtime_backend_dst),
         "runtimeSidecarPath": str(runtime_sidecar_dst),
+        "runtimeConfigPath": str(runtime_meta_path),
         "copiedPluginTree": copied_plugin,
         "bridgeTools": copied_tools,
         "copiedCommands": copied_commands,
@@ -284,7 +295,7 @@ def start_backend(plugin_root: Path, host: str, port: int) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="ThinkTank v2.0 Plugin Installer & Readiness Checker")
+    parser = argparse.ArgumentParser(description="ThinkTank v3.0 Plugin Installer & Readiness Checker")
     parser.add_argument("--check", action="store_true", help="Verify runtime dependencies, canonical agents, and files")
     parser.add_argument("--install", action="store_true", help="Sync bridge tools and plugin tree to Antigravity config dir")
     parser.add_argument("--target-dir", default="", help="Override Antigravity config root (defaults to ~/.gemini/config)")

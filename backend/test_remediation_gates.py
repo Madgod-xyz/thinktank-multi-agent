@@ -877,6 +877,8 @@ class RemediationGatesTests(unittest.TestCase):
             self.assertTrue((target / "tools" / "install_antigravity_hook.py").is_file())
             self.assertTrue((target / "commands" / "thinktank.toml").is_file())
             self.assertTrue((target / "hooks.json").is_file())
+            runtime_meta = json.loads((target / "thinktank" / "runtime.json").read_text(encoding="utf-8"))
+            self.assertEqual(runtime_meta["pythonExecutable"], str(Path(sys.executable)))
             self.assertFalse(stale_archived.exists())
             self.assertFalse(stale_pack.exists())
             self.assertFalse(stale_agent.exists())

@@ -69,21 +69,37 @@ The sidecar is built with container queries (`@container` from `360px` compact p
 
 ### Prerequisites
 
-- Python 3.10+ (`fastapi`, `uvicorn` from `backend/requirements.txt`)
-- Node.js 18+ (for the sidecar server and `node --test` contract suite)
+- **Python 3.10+** (`fastapi`, `uvicorn`, `pydantic`, `httpx` listed in `backend/requirements.txt`)
+- **Node.js 18+** (built-in modules only — `sidecars/think-tank/` has zero external npm runtime dependencies)
+- **Antigravity** (defaults to `~/.gemini/config`, overrideable via `GEMINI_CONFIG_DIR` or `--target-dir`)
 
 ### Setup & Slash Command
 
 ```bash
-# 1. Inspect local environment, slash commands, hooks, and canonical agents
-python tools/install_plugin.py --check
+# 1. Clone the repository
+git clone https://github.com/mad-helpers/thinktank-multi-agent.git
+cd thinktank-multi-agent
 
-# 2. Install bridge scripts, /ThinkTank slash command, and Antigravity hooks.json
-python tools/install_plugin.py --install
+# 2. Install Python backend dependencies (recommended: inside a virtual environment)
+python3 -m venv .venv
+# Linux / macOS:
+.venv/bin/pip install -r backend/requirements.txt
+# Windows PowerShell:
+# .venv\Scripts\pip install -r backend\requirements.txt
 
-# 3. Start the FastAPI Case Ledger backend (default port 8780)
-python tools/install_plugin.py --start-backend
+# 3. Verify readiness using the same Python interpreter
+.venv/bin/python tools/install_plugin.py --check
+
+# 4. Install plugin tree, bridge tools, /ThinkTank slash command, runtime.json, and hooks.json
+.venv/bin/python tools/install_plugin.py --install
+
+# 5. Start the FastAPI Case Ledger backend (default port 8780)
+.venv/bin/python tools/install_plugin.py --start-backend
 ```
+
+> **Note:** On Windows replace `.venv/bin/python` with `.venv\Scripts\python.exe` (or use `python` directly if installing globally). Running `--install` records your active Python interpreter in `~/.gemini/config/thinktank/runtime.json`, so the sidecar auto-starts the backend inside your `.venv` without needing `THINKTANK_PYTHON`.
+>
+> **After installation:** Reload or restart Antigravity so it picks up `~/.gemini/config/plugins/team-orchestration-director`, `~/.gemini/config/hooks.json`, and `/ThinkTank`. `agents/ui-frontend-designer.md` also lists optional external UI skills (`hallmark`, `design-tokens`, `responsive-layout`, `microinteractions`, `accessibility-qa`, `dark-mode-visuals`, `design-handoff`, `design-to-code`) that enhance frontend work if installed separately; all core Case Ledger workflows work standalone without them.
 
 Once installed, trigger an isolated Case Ledger run inside any Antigravity conversation with:
 

@@ -204,6 +204,22 @@ async function backendHealthy() {
   }
 }
 
+function resolveBackendPython() {
+  const explicit = (process.env.THINKTANK_PYTHON || process.env.PYTHON || '').trim();
+  if (explicit) return explicit;
+  const configDir = (process.env.GEMINI_CONFIG_DIR || '').trim()
+    || join(process.env.USERPROFILE || process.env.HOME || homedir(), '.gemini', 'config');
+  try {
+    const runtimePath = join(configDir, 'thinktank', 'runtime.json');
+    if (existsSync(runtimePath)) {
+      const meta = JSON.parse(readFileSync(runtimePath, 'utf8'));
+      const recorded = String(meta?.pythonExecutable || '').trim();
+      if (recorded && existsSync(recorded)) return recorded;
+    }
+  } catch (_) {}
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
 async function ensureBackendRunning() {
   if (await backendHealthy()) return { ok: true };
   if (['0', 'false', 'no'].includes(String(process.env.THINKTANK_AUTO_START || '1').toLowerCase())) {
@@ -215,7 +231,7 @@ async function ensureBackendRunning() {
   if (!backendStartup) {
     backendStartup = (async () => {
       try {
-        const python = process.env.THINKTANK_PYTHON || process.env.PYTHON || 'python';
+        const python = resolveBackendPython();
         const child = spawn(python, [
           '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', '8780',
         ], {
