@@ -1726,6 +1726,47 @@ class RemediationGatesTests(unittest.TestCase):
         ctx_next = self.client.get("/api/host/context", params={"workspaceUri": ws_uri}).json()
         self.assertEqual(ctx_next["conversationId"], tt_next_cid)
 
+        # Auto-record DELEGATE interaction edge on invoke_subagent in active ThinkTank session
+        r_inv = self.client.post(
+            "/api/telemetry/host_tool",
+            json={
+                "id": "inv-auto-edge-1",
+                "convId": tt_next_cid,
+                "tool": "invoke_subagent",
+                "status": "SUCCESS",
+                "stepIdx": 2,
+                "args": {"TypeName": "council-critic", "Role": "Design Audit"},
+                "output": "",
+            },
+        )
+        self.assertEqual(r_inv.status_code, 200)
+        st_next = self.client.get("/api/status", params={"convId": tt_next_cid}).json()
+        self.assertTrue(
+            any(
+                ev.get("from") == "main_agent" and ev.get("to") == "council-critic" and ev.get("action") == "DELEGATE"
+                for ev in st_next.get("interactions", [])
+            )
+        )
+
+        # _extract_workspace_uri recovers workspaceUris from head of transcripts > 64KB
+        with tempfile.TemporaryDirectory(prefix="tt_ws_head_") as tmp_head:
+            brain = Path(tmp_head)
+            long_cid = "66666666-ffff-7777-8888-999999999999"
+            log_path = brain / long_cid / ".system_generated" / "logs" / "transcript.jsonl"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                json.dumps({"step_index": 0, "workspaceUris": ["file:///c:/workspaces/head-repo"]})
+                + "\n"
+                + ("x" * 70000)
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"THINKTANK_ANTIGRAVITY_BRAIN_DIR": str(brain)}):
+                self.assertEqual(
+                    hook_bridge._extract_workspace_uri({}, long_cid),
+                    "file:///c:/workspaces/head-repo",
+                )
+
         # 3. SyncEventStore.prune_bloat removes legacy TELEMETRY_UPDATE rows & trims bloated snapshots
         with tempfile.TemporaryDirectory(prefix="tt_prune_test_") as tmp_db_dir:
             db_path = Path(tmp_db_dir) / "bloat.sqlite3"

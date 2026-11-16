@@ -904,7 +904,7 @@ test('Deep tracking fix: /health cache in main.mjs, flash-free switchConversatio
   assert.equal(refreshCalls, 0);
 });
 
-test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellipse clearance, userSpaceOnUse markers, and resize reactivity', () => {
+test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellipse clearance, userSpaceOnUse markers, and resize reactivity', async () => {
   assert.match(appCss, /#swarm-interaction-svg\s*\{[^}]*direction:\s*ltr;/, '#swarm-interaction-svg must enforce direction: ltr so RTL tier labels never clip');
   assert.match(html, /id="graph-replay-seq"[^>]*dir="ltr"/, '#graph-replay-seq must enforce dir="ltr"');
   assert.match(appJs, /markerUnits="userSpaceOnUse"/, 'Network arrow markers must use userSpaceOnUse');
@@ -915,7 +915,15 @@ test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellip
   const glyphsMatch = appJs.match(/const ROLE_GLYPHS\s*=\s*\{[\s\S]*?\};/);
   assert.ok(netMatch && roleDefaultsMatch && glyphsMatch, 'app.js must define ROLE_DEFAULTS, ROLE_GLYPHS, and renderNetworkView');
 
-  const fakeSvg = { attrs: {}, innerHTML: '', setAttribute(k, v) { this.attrs[k] = v; } };
+  let htmlWrites = 0;
+  let storedHtml = '';
+  const fakeSvg = {
+    attrs: {},
+    dataset: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    get innerHTML() { return storedHtml; },
+    set innerHTML(v) { htmlWrites += 1; storedHtml = v; },
+  };
   const netSb = {
     document: { documentElement: { dir: 'rtl' } },
     $: (sel) => (sel === '#swarm-interaction-svg' ? fakeSvg : sel === '#network-graph-wrap' ? { clientWidth: 640 } : null),
@@ -931,15 +939,16 @@ test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellip
     requestTypeLabel: () => 'Peer sync',
     requestCategoryMeta: () => ({ color: 'var(--cat-sync)', netMarker: 'net-cat-sync' }),
     eventTone: () => ({ tone: 'muted', color: 'var(--ink-muted)' }),
-    state: { agents: [], inspectorItem: null, isClosed: false, language: 'fa' },
+    state: { activeConvId: 'conv-net-1', agents: [], inspectorItem: null, isClosed: false, language: 'fa' },
   };
   const sampleEvents = [
     { seq: 1, from: 'backend-auditor', to: 'ui-frontend-designer', action: 'PEER_SYNC', summary: 'Sync contracts' },
     { seq: 2, from: 'ui-frontend-designer', to: 'backend-auditor', action: 'PEER_SYNC', summary: 'Ack contracts' },
     { seq: 3, from: 'council-critic', to: 'backend-auditor', action: 'RETURN_DEFECT', summary: 'Fix F-01' },
   ];
-  vm.runInNewContext(`${roleDefaultsMatch[0]}\n${glyphsMatch[0]}\n${netMatch[0]}\nrenderNetworkView(${JSON.stringify(sampleEvents)}, 10);`, netSb);
+  vm.runInNewContext(`${roleDefaultsMatch[0]}\n${glyphsMatch[0]}\n${netMatch[0]}\nrenderNetworkView(${JSON.stringify(sampleEvents)}, 10);\nrenderNetworkView(${JSON.stringify(sampleEvents)}, 10);`, netSb);
 
+  assert.equal(htmlWrites, 1, 'renderNetworkView must cache dataset.netKey so identical redraws never tear down SVG DOM');
   assert.equal(fakeSvg.attrs.viewBox, '0 0 640 440');
   const curves = [...fakeSvg.innerHTML.matchAll(/class="net-edge-stroke" d="M ([0-9.]+) ([0-9.]+) Q ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)"/g)];
   assert.equal(curves.length, 3);
@@ -948,4 +957,23 @@ test('Network board arrow geometry redesign: RTL SVG safe anchors, tangent ellip
     assert.ok(Number(cx) > 0 && Number(cy) > 0, 'Control point must stay inside positive viewport coordinates');
   }
   assert.match(fakeSvg.innerHTML, /style="direction:ltr;unicode-bidi:plaintext"/, 'Network SVG text must stabilize RTL anchoring');
+
+  // syncHostContextOnly must NOT reset an open active unclosed case on transient workspaceMatched=false
+  const syncMatch = appJs.match(/async function syncHostContextOnly\([\s\S]*?\n\s{2}\}/);
+  assert.ok(syncMatch, 'app.js must define syncHostContextOnly()');
+  let resetFired = false;
+  const holdSb = {
+    hostSyncInFlight: null,
+    state: { activeConvId: 'open-case-1', hostConvId: 'open-case-1', userPinnedConv: false, hasSession: true, isClosed: false },
+    getHostContextPath: () => '/api/host/context',
+    apiGet: async () => ({ conversationId: '', workspaceMatched: false }),
+    resolveHostConvId: () => '',
+    switchConversation: async () => {},
+    refreshStatus: async () => {},
+    resetConversationViewState: () => { resetFired = true; },
+    renderAll: () => {},
+    toast: () => {},
+  };
+  await vm.runInNewContext(`${syncMatch[0]}\nsyncHostContextOnly(false);`, holdSb);
+  assert.equal(resetFired, false, 'syncHostContextOnly must not wipe an open active case on workspaceMatched=false');
 });

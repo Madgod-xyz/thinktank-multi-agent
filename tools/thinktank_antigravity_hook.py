@@ -336,7 +336,11 @@ def _extract_workspace_uri(payload: dict[str, Any], conv_id: str | None = None) 
                 with tpath.open("rb") as fp:
                     fp.seek(max(0, size - 65536))
                     tail = fp.read().decode("utf-8", errors="ignore")
-                matches = re.findall(r'"workspaceUris"\s*:\s*\[\s*"([^"]+)"', tail)
+                    matches = re.findall(r'"workspaceUris"\s*:\s*\[\s*"([^"]+)"', tail)
+                    if not matches and size > 65536:
+                        fp.seek(0)
+                        head = fp.read(32768).decode("utf-8", errors="ignore")
+                        matches = re.findall(r'"workspaceUris"\s*:\s*\[\s*"([^"]+)"', head)
                 if matches:
                     return _normalize_workspace_uri(matches[-1])
             except Exception:

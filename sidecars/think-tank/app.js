@@ -646,12 +646,14 @@
       u: data.roleUsage,
       cr: data.closureReceipt,
     });
-    if (snapKey !== lastSnapshotHash) {
+    const snapChanged = snapKey !== lastSnapshotHash;
+    if (snapChanged) {
       lastSnapshotHash = snapKey;
       dataRevision += 1;
     }
 
     const prevRunIndex = state.runIndex;
+    const prevHasSession = state.hasSession;
     state.hasSession = computeHasSession(data, tt);
     state.project = tt.project ?? '';
     state.directive = tt.directive ?? '';
@@ -693,6 +695,10 @@
       state.replaySeq = getMaxRecordedSeq();
     }
 
+    if (!snapChanged && dataRevision > 0 && state.hasSession === prevHasSession && typeof renderHeaderAndVisibility === 'function') {
+      renderHeaderAndVisibility();
+      return;
+    }
     renderAll();
   }
 
@@ -1976,7 +1982,9 @@
 
     const svg = $('#swarm-interaction-svg');
     if (!svg) return;
-    const containerW = Math.max(540, Math.min(860, $('#network-graph-wrap')?.clientWidth || 640));
+    const rawNetW = $('#network-graph-wrap')?.clientWidth || 0;
+    if (rawNetW > 0) state.lastNetWidth = rawNetW;
+    const containerW = Math.max(540, Math.min(860, rawNetW || state.lastNetWidth || 640));
     const h = 440;
     svg.setAttribute('viewBox', `0 0 ${containerW} ${h}`);
 
@@ -1989,6 +1997,24 @@
     row1.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row1.length - 1)) * i, y: 76 }; });
     row2.forEach((id) => { pos[id] = { x: Math.min(containerW - sidePad, Math.round(containerW * 0.72)), y: 222 }; });
     row3.forEach((id, i) => { pos[id] = { x: sidePad + (spanW / (row3.length - 1)) * i, y: 368 }; });
+
+    const selEdge = state.inspectorItem?.type === 'edge'
+      ? `${normalizeRoleId(state.inspectorItem.from)}>${normalizeRoleId(state.inspectorItem.to)}`
+      : '';
+    const netNodesSig = Object.keys(pos).map((id) => {
+      const active = isRoleActiveInCase(id) ? 1 : 0;
+      const ag = state.agents.find((a) => normalizeRoleId(a.id) === id);
+      const working = !state.isClosed && ag && isWorkingAgentStatus(ag.status) ? 1 : 0;
+      return `${id}:${active}${working}`;
+    }).join(',');
+    const netEdgesSig = edges.map((e) => {
+      const latest = e.events[e.events.length - 1];
+      const eTone = eventTone(latest, cutoff, events).tone;
+      return `${e.from}>${e.to}:${e.count}:${e.openCount}:${eTone}:${requestTypeLabel(latest)}`;
+    }).join('|');
+    const netStructKey = `${state.activeConvId || ''}|${state.language}|${containerW}|${state.isClosed ? 1 : 0}|${selEdge}|${netNodesSig}|${netEdgesSig}`;
+    if (svg.dataset && svg.dataset.netKey === netStructKey && svg.innerHTML) return;
+    if (svg.dataset) svg.dataset.netKey = netStructKey;
 
     const markerPath = '<path d="M 1 1.5 L 10.5 6 L 1 10.5 L 3.4 6 z"';
     const markerDefs = [
@@ -2435,10 +2461,12 @@
             return true;
           }
         } else if (ctx && ctx.workspaceMatched === false && !state.userPinnedConv && state.activeConvId) {
-          state.hostConvId = '';
-          state.activeConvId = '';
-          resetConversationViewState();
-          renderAll();
+          if (!(state.hasSession && !state.isClosed)) {
+            state.hostConvId = '';
+            state.activeConvId = '';
+            resetConversationViewState();
+            renderAll();
+          }
         }
         if (forceNotify) toast(tKey('empty.syncNoMatch'));
       } catch (_) {

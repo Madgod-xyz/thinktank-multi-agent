@@ -3950,6 +3950,33 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
     # Do not re-activate an already closed session when host tool telemetry arrives
     agent_updated = False
     durable_agent_event = False
+    auto_collab_msg = None
+    caller_role = mapped_role if (mapped_role and mapped_role not in {"user", "subagent"}) else normalize_agent_id(req.agentId or "main_agent")
+    if not caller_role or caller_role in {"user", "antigravity"}:
+        caller_role = "main_agent"
+    caller_name = req.agentName if (req.agentName and req.agentName != "Antigravity") else ("هماهنگ‌کننده اصلی" if caller_role == "main_agent" else caller_role)
+
+    def _record_hook_interaction(msg_id: str, to_role: str, to_name: str, summary: str, action: str, child_cid: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not to_role or to_role == caller_role or to_role in {"user", "subagent"} or not has_thinktank_activity(conv):
+            return None
+        if any(isinstance(m, dict) and m.get("id") == msg_id for m in conv.get("messages", [])):
+            return None
+        return append_message(conv, {
+            "id": msg_id,
+            "channel": "SUBAGENTS",
+            "senderCode": caller_role.upper(),
+            "senderName": caller_name,
+            "senderRole": caller_role,
+            "recipientCode": to_role.upper(),
+            "recipientName": to_name or to_role,
+            "recipientRole": to_role,
+            "timestamp": time.strftime("%H:%M:%S"),
+            "content": summary,
+            "origin": "subagent" if mapped else "main-proxy",
+            "subagentConvId": child_cid or raw_cid,
+            "convId": cid,
+        }, action_type=action)
+
     if not is_closed:
         if mapped_role and mapped_role not in {"user", "subagent"}:
             was_known = any(normalize_agent_id(a.get("id", "")) == mapped_role and a.get("verifiedSubagent") for a in conv.get("agents") or [])
@@ -4024,6 +4051,15 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                     status="WORKING",
                     increment_turn=True,
                 )
+            if role_id and role_id != "user":
+                auto_collab_msg = _record_hook_interaction(
+                    f"hook-delegate-{req.id}",
+                    role_id,
+                    role_desc or role_id,
+                    f"واگذاری اجرا به زیرعامل {role_desc or role_id}",
+                    "DELEGATE",
+                    spawned_cid,
+                )
         elif tool_name.endswith("send_message"):
             args = req.args or {}
             recip_cid = str(args.get("Recipient") or args.get("recipient") or "").strip()
@@ -4041,10 +4077,29 @@ async def log_antigravity_tool_event(req: AntigravityToolEventRequest):
                         verified_subagent=True,
                         increment_turn=True,
                     )
+                    auto_collab_msg = _record_hook_interaction(
+                        f"hook-msg-{req.id}",
+                        recip_role,
+                        (recip_info or {}).get("roleTitle") or recip_role,
+                        f"ارسال پیام / ادامهٔ کار با {recip_role}",
+                        "MESSAGE",
+                        recip_cid,
+                    )
 
     sync_store.save_snapshot_only(cid, conv)
     schedule_persisted_state_save()
     await manager.broadcast_transient({"type": "TELEMETRY_UPDATE", "convId": cid, "telemetryEntry": entry})
+    if auto_collab_msg is not None:
+        await manager.broadcast({
+            "type": "NEW_MESSAGE",
+            "convId": cid,
+            "message": auto_collab_msg,
+            "thinkTank": conv["thinkTank"],
+            "originCounts": _compute_origin_counts(conv),
+            "interactions": conv.get("interactions", []),
+            "graph": build_interaction_graph(conv),
+            "roleUsage": role_usage(conv.get("messages", [])),
+        })
     if agent_updated:
         if durable_agent_event and has_thinktank_activity(conv):
             await manager.broadcast({"type": "AGENTS_UPDATE", "convId": cid, "agents": conv["agents"]})
