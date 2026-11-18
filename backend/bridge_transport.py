@@ -1,4 +1,4 @@
-"""Verified HTTP transport and durable offline outbox for ThinkTank events."""
+"""Verified HTTP transport and durable offline outbox for ThinkTank v4.0 events."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import sqlite3
 import subprocess
 import sys
 import time
-import urllib.parse
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import closing
@@ -27,7 +27,7 @@ _DEFAULT_BACKEND = _SIBLING_BACKEND if (_SIBLING_BACKEND / "app.py").is_file() e
 BACKEND_DIR = Path(os.environ.get("THINKTANK_BACKEND_DIR", _DEFAULT_BACKEND)).expanduser()
 
 
-def _request(url: str, *, data: Optional[dict] = None, event_id: Optional[str] = None, timeout: float = 6.0):
+def _request(url: str, *, data: Optional[dict[str, Any]] = None, event_id: Optional[str] = None, timeout: float = 6.0) -> dict[str, Any]:
     body = None if data is None else json.dumps(data, ensure_ascii=False).encode("utf-8")
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -40,12 +40,17 @@ def _request(url: str, *, data: Optional[dict] = None, event_id: Optional[str] =
         return json.loads(raw) if raw else {"status": "ok"}
 
 
-def _health_check(timeout: float = 3.0) -> bool:
-    try:
-        result = _request(f"{API_BASE}/status", timeout=timeout)
-        return result.get("syncMode") == "durable-websocket" and bool(result.get("sync", {}).get("generation"))
-    except Exception:
-        return False
+def _health_check(timeout: float = 2.0) -> bool:
+    for path in ("health", "status"):
+        try:
+            result = _request(f"{API_BASE}/{path}", timeout=timeout)
+            if isinstance(result, dict) and result.get("syncMode") == "durable-websocket" and bool(
+                result.get("ok") or (result.get("sync") or {}).get("generation")
+            ):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def ensure_backend_running() -> bool:
@@ -69,7 +74,7 @@ def ensure_backend_running() -> bool:
         return False
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline:
-        if _health_check(timeout=2.0):
+        if _health_check(timeout=1.5):
             return True
         time.sleep(0.15)
     return False
@@ -86,7 +91,18 @@ def _connect_outbox(timeout: float = 5.0) -> sqlite3.Connection:
     return db
 
 
-def _enqueue(endpoint: str, data: dict, event_id: str, *, db_timeout: float = 5.0) -> dict[str, Any]:
+def outbox_queue_count() -> int:
+    if not OUTBOX_DB.is_file():
+        return 0
+    try:
+        with closing(_connect_outbox(timeout=1.0)) as db:
+            row = db.execute("SELECT COUNT(*) FROM outbox").fetchone()
+            return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _enqueue(endpoint: str, data: dict[str, Any], event_id: str, *, db_timeout: float = 5.0) -> dict[str, Any]:
     with closing(_connect_outbox(timeout=db_timeout)) as db:
         with db:
             db.execute(
@@ -103,8 +119,7 @@ def _delete_outbox_event(event_id: str, *, db_timeout: float = 5.0) -> None:
 
 
 def flush_outbox_fast(*, max_events: int = 2, timeout: float = 0.2) -> bool:
-    """Best-effort bounded flush for host hooks with a short runtime budget."""
-    if max_events <= 0:
+    if max_events <= 0 or not OUTBOX_DB.is_file():
         return True
     db_timeout = min(max(timeout, 0.05), 0.25)
     with closing(_connect_outbox(timeout=db_timeout)) as db:
@@ -114,10 +129,7 @@ def flush_outbox_fast(*, max_events: int = 2, timeout: float = 0.2) -> bool:
         ).fetchall()
     for event_id, endpoint, data_json in rows:
         try:
-            _request(
-                f"{API_BASE}/{endpoint.lstrip('/')}",
-                data=json.loads(data_json), event_id=event_id, timeout=timeout,
-            )
+            _request(f"{API_BASE}/{endpoint.lstrip('/')}", data=json.loads(data_json), event_id=event_id, timeout=timeout)
         except urllib.error.HTTPError as error:
             if 400 <= error.code < 500:
                 _delete_outbox_event(event_id, db_timeout=db_timeout)
@@ -129,32 +141,20 @@ def flush_outbox_fast(*, max_events: int = 2, timeout: float = 0.2) -> bool:
     return True
 
 
-def api_post_fast(
-    endpoint: str,
-    data: dict,
-    conv_id: Optional[str] = None,
-    *,
-    event_id: Optional[str] = None,
-    timeout: float = 0.35,
-) -> dict[str, Any]:
-    """Persist an event first, then attempt its immediate delivery within a short budget."""
+def api_post_fast(endpoint: str, data: dict[str, Any], conv_id: Optional[str] = None, *, event_id: Optional[str] = None, timeout: float = 0.35) -> dict[str, Any]:
     payload = dict(data)
     if conv_id:
         payload["convId"] = conv_id
-    stable_event_id = str(event_id or payload.get("eventId") or uuid.uuid4())
+    stable_event_id = str(event_id or payload.pop("eventId", None) or uuid.uuid4())
     payload.pop("eventId", None)
     db_timeout = min(max(timeout, 0.05), 0.25)
     _enqueue(endpoint, payload, stable_event_id, db_timeout=db_timeout)
     try:
-        result = _request(
-            f"{API_BASE}/{endpoint.lstrip('/')}", data=payload,
-            event_id=stable_event_id, timeout=timeout,
-        )
+        result = _request(f"{API_BASE}/{endpoint.lstrip('/')}", data=payload, event_id=stable_event_id, timeout=timeout)
     except urllib.error.HTTPError as error:
         if 400 <= error.code < 500:
             _delete_outbox_event(stable_event_id, db_timeout=db_timeout)
-            detail = error.read().decode("utf-8", errors="replace")
-            return {"status": "error", "httpStatus": error.code, "error": detail}
+            return {"status": "error", "httpStatus": error.code, "error": error.read().decode("utf-8", errors="replace")}
         return {"status": "queued_offline", "eventId": stable_event_id}
     except Exception:
         return {"status": "queued_offline", "eventId": stable_event_id}
@@ -165,62 +165,34 @@ def api_post_fast(
 
 
 def _drain_outbox(limit: int = 10) -> bool:
-    with closing(_connect_outbox()) as db:
-        rows = db.execute("SELECT event_id, endpoint, data_json FROM outbox ORDER BY created_at, event_id LIMIT ?", (limit,)).fetchall()
-    for event_id, endpoint, data_json in rows:
-        try:
-            _request(f"{API_BASE}/{endpoint.lstrip('/')}", data=json.loads(data_json), event_id=event_id, timeout=6.0)
-        except urllib.error.HTTPError as error:
-            if 400 <= error.code < 500:
-                with closing(_connect_outbox()) as db:
-                    with db:
-                        db.execute("DELETE FROM outbox WHERE event_id = ?", (event_id,))
-                continue
-            if not (200 <= error.code < 300):
-                return False
-        except Exception:
-            return False
-        with closing(_connect_outbox()) as db:
-            with db:
-                db.execute("DELETE FROM outbox WHERE event_id = ?", (event_id,))
-    return True
+    return flush_outbox_fast(max_events=limit, timeout=6.0)
 
 
-def api_post(endpoint: str, data: dict, conv_id: Optional[str] = None) -> dict[str, Any]:
+def api_post(endpoint: str, data: dict[str, Any], conv_id: Optional[str] = None) -> dict[str, Any]:
     payload = dict(data)
     if conv_id:
         payload["convId"] = conv_id
     event_id = str(payload.pop("eventId", None) or uuid.uuid4())
     url = f"{API_BASE}/{endpoint.lstrip('/')}"
-    try:
-        result = _request(url, data=payload, event_id=event_id, timeout=8.0)
-        result.setdefault("eventId", event_id)
-        _drain_outbox(limit=3)
-        return result
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        return {"status": "error", "httpStatus": error.code, "error": detail}
-    except Exception:
-        if not ensure_backend_running():
-            return _enqueue(endpoint, payload, event_id)
+    for attempt in range(2):
         try:
             result = _request(url, data=payload, event_id=event_id, timeout=8.0)
             result.setdefault("eventId", event_id)
             _drain_outbox(limit=3)
             return result
         except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            return {"status": "error", "httpStatus": error.code, "error": detail}
+            return {"status": "error", "httpStatus": error.code, "error": error.read().decode("utf-8", errors="replace")}
         except Exception:
+            if attempt == 0 and ensure_backend_running():
+                continue
             return _enqueue(endpoint, payload, event_id)
+    return _enqueue(endpoint, payload, event_id)
 
 
 def api_get(endpoint: str, conv_id: Optional[str] = None) -> Optional[dict[str, Any]]:
     if not ensure_backend_running():
         return {"status": "offline", "syncMode": "disconnected"}
-    url = f"{API_BASE}/{endpoint.lstrip('/')}"
-    if conv_id:
-        url += f"?convId={urllib.parse.quote(conv_id)}"
+    url = f"{API_BASE}/{endpoint.lstrip('/')}" + (f"?convId={urllib.parse.quote(conv_id)}" if conv_id else "")
     try:
         return _request(url)
     except Exception:

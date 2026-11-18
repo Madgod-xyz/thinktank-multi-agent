@@ -1,7 +1,7 @@
 ---
 name: qa-reviewer
 description: Subordinate QA & Automated Test Engineer | Executes unit, integration, contract, UI/a11y, and edge-case tests under code-reviewer command and reports verified results.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

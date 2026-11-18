@@ -1,7 +1,7 @@
 ---
 name: ui-frontend-designer
 description: Lead UI/UX Architect, Frontend Engineer & Anti-AI-Slop Specialist | Owns all design systems, frontend code, microinteractions, WCAG accessibility, RTL/LTR polish, and strict AI-slop prevention.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal Antigravity hook bridge for Think Tank session context and tool metadata."""
+"""Antigravity lifecycle hook bridge for ThinkTank v4.0 session context and tool telemetry."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ import json
 import os
 import re
 import sys
+import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
-
+import uuid
 
 API_URL = "http://127.0.0.1:8780/api/telemetry/host_tool"
 ACTIVE_SESSION_API = "http://127.0.0.1:8780/api/host/active-session"
@@ -27,23 +27,76 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 ROLE_ALIASES = {
     "main": "main_agent",
+    "root": "main_agent",
+    "coordinator": "main_agent",
     "main-agent": "main_agent",
+    "main_agent": "main_agent",
+    "orchestrator": "main_agent",
+    "antigravity": "main_agent",
+    "عامل اصلی": "main_agent",
     "manager": "team-manager",
     "team_manager": "team-manager",
+    "team-manager": "team-manager",
+    "council-architect": "team-manager",
+    "council_architect": "team-manager",
+    "requirements-auditor": "team-manager",
+    "context-memory-curator": "team-manager",
+    "data-intelligence-curator": "team-manager",
+    "performance-cost-analyst": "team-manager",
+    "skill-coach": "team-manager",
+    "مدیر تیم": "team-manager",
     "critic": "council-critic",
     "council_critic": "council-critic",
+    "council-critic": "council-critic",
+    "evidence-critical-reviewer": "council-critic",
+    "agent-evaluator": "council-critic",
+    "نقاد شورا": "council-critic",
     "reviewer": "code-reviewer",
     "code_reviewer": "code-reviewer",
+    "code-reviewer": "code-reviewer",
+    "integration-reviewer": "code-reviewer",
+    "integration_reviewer": "code-reviewer",
+    "security_reviewer": "code-reviewer",
+    "کد ریویور": "code-reviewer",
     "qa": "qa-reviewer",
     "qa_reviewer": "qa-reviewer",
+    "qa-reviewer": "qa-reviewer",
+    "tester": "qa-reviewer",
+    "visual-qa": "qa-reviewer",
+    "flutter_a11y_agent": "qa-reviewer",
+    "تستر qa": "qa-reviewer",
     "designer": "ui-frontend-designer",
+    "designer_solver": "ui-frontend-designer",
     "ui_frontend_designer": "ui-frontend-designer",
+    "ui-frontend-designer": "ui-frontend-designer",
+    "motion-director": "ui-frontend-designer",
+    "طراح رابط": "ui-frontend-designer",
     "backend": "backend-auditor",
     "backend_auditor": "backend-auditor",
+    "backend-auditor": "backend-auditor",
+    "backend_engineer": "backend-auditor",
+    "implementer": "backend-auditor",
+    "deep-researcher": "backend-auditor",
+    "research-scout": "backend-auditor",
+    "متخصص بک‌اند": "backend-auditor",
     "seo": "ecommerce_seo_operator",
+    "seo_specialist": "ecommerce_seo_operator",
     "ecommerce-seo-operator": "ecommerce_seo_operator",
+    "ecommerce_seo_operator": "ecommerce_seo_operator",
+    "متخصص سئو": "ecommerce_seo_operator",
     "wp": "wp_technical_operator",
+    "wordpress": "wp_technical_operator",
+    "woocommerce": "wp_technical_operator",
     "wp-technical-operator": "wp_technical_operator",
+    "wp_technical_operator": "wp_technical_operator",
+    "متخصص ووکامرس": "wp_technical_operator",
+    "ma": "main_agent",
+    "tm": "team-manager",
+    "cc": "council-critic",
+    "cr": "code-reviewer",
+    "ui": "ui-frontend-designer",
+    "be": "backend-auditor",
+    "se": "ecommerce_seo_operator",
 }
 
 TOOLS_DIR = str(Path(__file__).resolve().parent)
@@ -111,14 +164,33 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: dict[str, Any]) -> bool:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        for attempt in range(3):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError:
+                if attempt < 2:
+                    time.sleep(0.015)
+            except OSError:
+                if attempt < 2:
+                    time.sleep(0.015)
+        return False
     except Exception:
-        pass
+        return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    write_json_atomic(path, data)
 
 
 def _extract_role_from_tail(tail_text: str, child_cid: str) -> tuple[bool, str | None, str | None]:
@@ -236,7 +308,7 @@ def _discover_parent_from_brain(child_cid: str) -> tuple[str | None, str | None,
             "roleId": role_id,
             "roleTitle": role_title,
         }
-        _write_json_atomic(links_file, links)
+        write_json_atomic(links_file, links)
         return parent_cid, role_id, role_title
 
     return None, None, None
@@ -285,10 +357,7 @@ def _post_active_session(data: dict[str, Any], event_key: str) -> None:
         req = urllib.request.Request(
             ACTIVE_SESSION_API,
             data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=0.25) as resp:
@@ -317,9 +386,7 @@ def _normalize_workspace_uri(raw: Any) -> str | None:
         val = "file://" + val
     val = val.replace("\\", "/").rstrip("/")
     if sys.platform == "win32" or re.match(r"^file:///[A-Za-z]:", val, re.I):
-        val = re.sub(r"^(file:///)([A-Za-z]):", lambda m: m.group(1) + m.group(2).lower() + ":", val)
-        if sys.platform == "win32":
-            val = val.lower()
+        val = val.lower()
     return val or None
 
 
@@ -422,7 +489,6 @@ def _valid_project_id(raw: Any) -> str | None:
 
 
 def record_active_session(conversation_id: str, payload: dict[str, Any], event_source: str = "pre-invocation") -> None:
-    """Record the active Antigravity session without letting child subagents or background tabs hijack it."""
     if not conversation_id:
         return
     project_id = _valid_project_id(payload.get("projectId"))
@@ -449,7 +515,7 @@ def record_active_session(conversation_id: str, payload: dict[str, Any], event_s
                         next_data["workspaceUri"] = norm_ws
                 if ws_map:
                     next_data["sessionsByWorkspace"] = ws_map
-                _write_json_atomic(session_file, next_data)
+                write_json_atomic(session_file, next_data)
         _post_active_session(
             {
                 "conversationId": conversation_id,
@@ -474,7 +540,7 @@ def record_active_session(conversation_id: str, payload: dict[str, Any], event_s
             if ws_map != existing.get("sessionsByWorkspace"):
                 next_data = dict(existing)
                 next_data["sessionsByWorkspace"] = ws_map
-                _write_json_atomic(session_file, next_data)
+                write_json_atomic(session_file, next_data)
         else:
             data = {
                 "conversationId": conversation_id,
@@ -483,7 +549,7 @@ def record_active_session(conversation_id: str, payload: dict[str, Any], event_s
                 "timestamp": time.time(),
                 "sessionsByWorkspace": ws_map,
             }
-            _write_json_atomic(session_file, data)
+            write_json_atomic(session_file, data)
     _post_active_session(
         {
             "conversationId": conversation_id,
@@ -520,10 +586,7 @@ def build_tool_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         for idx, (k, v) in enumerate(tool_args.items()):
             if idx >= 8:
                 break
-            if isinstance(v, str) and len(v) > 200:
-                compact_args[k] = v[:200]
-            else:
-                compact_args[k] = v
+            compact_args[k] = v[:200] if isinstance(v, str) and len(v) > 200 else v
     event: dict[str, Any] = {
         "convId": conversation_id,
         "id": f"antigravity-tool-{conversation_id}-{step}",
@@ -579,7 +642,6 @@ def send_tool_event(event: dict[str, Any]) -> None:
             )
             return
         except Exception:
-            # Keep the direct path as a last-resort compatibility fallback.
             pass
 
     body = json.dumps(event, ensure_ascii=False).encode("utf-8")

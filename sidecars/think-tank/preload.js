@@ -1,2 +1,2 @@
-// Preload script placeholder for sidecar iframe
-window.sidecar = window.sidecar || {};
+// Preload fallback shim for standalone browser mode
+window.sidecar = Object.assign({ convId: null }, window.sidecar || {});

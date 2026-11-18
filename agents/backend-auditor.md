@@ -1,7 +1,7 @@
 ---
 name: backend-auditor
 description: Principal Backend, Core Systems & Security Engineer | Owns server logic, REST/WebSocket APIs, databases, cloud runtimes, security hardening, and self-checking tests.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

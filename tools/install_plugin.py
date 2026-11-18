@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portable installer & environment readiness verifier for team-orchestration-director (ThinkTank v3.0).
+Portable installer & environment readiness verifier for team-orchestration-director (ThinkTank v4.0).
 Resolves paths dynamically via Path(__file__) and Path.home(); contains zero hardcoded user paths.
 """
 
@@ -11,8 +11,10 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -37,7 +39,17 @@ IGNORED_COPY_NAMES = {
     "active_antigravity_session.json",
 }
 
-IGNORED_COPY_SUFFIXES = (".pyc", ".pyo", ".bak", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm")
+IGNORED_COPY_SUFFIXES = (".pyc", ".pyo", ".bak", ".tmp", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm")
+
+STALE_V3_SIDECAR_FILES = (
+    "roles.css",
+    "tailwind.js",
+    "app.js",
+    "i18n.js",
+    "activity.js",
+    "conversation-context.mjs",
+    "ui-preferences.mjs",
+)
 
 
 def get_plugin_root() -> Path:
@@ -52,7 +64,7 @@ def get_default_target_dir() -> Path:
 
 
 def check_backend_health(host: str, port: int, timeout: float = 1.5) -> tuple[bool, str]:
-    url = f"http://{host}:{port}/api/roles"
+    url = f"http://{host}:{port}/api/health"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             if 200 <= resp.status < 300:
@@ -66,8 +78,7 @@ def run_checks(plugin_root: Path, host: str, port: int, require_backend: bool = 
     errors: list[str] = []
     warnings: list[str] = []
 
-    py_ok = sys.version_info >= (3, 10)
-    if not py_ok:
+    if sys.version_info < (3, 10):
         errors.append(f"Python >= 3.10 required; found {sys.version.split()[0]}")
 
     node_path = shutil.which("node")
@@ -80,12 +91,25 @@ def run_checks(plugin_root: Path, host: str, port: int, require_backend: bool = 
 
     required_files = [
         "plugin.json",
+        "package.json",
         "backend/app.py",
+        "backend/catalog.py",
+        "backend/governance.py",
+        "backend/ledger_domain.py",
+        "backend/store.py",
+        "backend/sync_store.py",
+        "backend/session_resolver.py",
+        "backend/ws_hub.py",
         "backend/requirements.txt",
+        "backend/role_catalog.json",
         "sidecars/think-tank/sidecar.json",
         "sidecars/think-tank/main.mjs",
         "sidecars/think-tank/index.html",
+        "sidecars/think-tank/tokens.css",
+        "sidecars/think-tank/app.css",
         "sidecars/think-tank/role_catalog.json",
+        "sidecars/think-tank/src/store.mjs",
+        "sidecars/think-tank/src/sync.mjs",
         "tools/thinktank_bridge.py",
         "tools/bridge_transport.py",
         "tools/thinktank_antigravity_hook.py",
@@ -132,23 +156,33 @@ def run_checks(plugin_root: Path, host: str, port: int, require_backend: bool = 
 
 
 def _ignore_copy(_src: str, names: list[str]) -> list[str]:
-    ignored: list[str] = []
-    for name in names:
-        if name in IGNORED_COPY_NAMES or name.endswith(IGNORED_COPY_SUFFIXES):
-            ignored.append(name)
-    return ignored
+    return [n for n in names if n in IGNORED_COPY_NAMES or n.endswith(IGNORED_COPY_SUFFIXES)]
 
 
-def _prune_stale_sidecar_assets(src_sidecar: Path, dst_sidecar: Path) -> None:
+def _prune_stale_sidecar_assets(src_sidecar: Path, dst_sidecar: Path) -> list[str]:
+    removed: list[str] = []
     if not dst_sidecar.is_dir() or src_sidecar.resolve() == dst_sidecar.resolve():
-        return
-    for stale_rel in ("roles.css", "tailwind.js"):
+        return removed
+    for stale_rel in STALE_V3_SIDECAR_FILES:
         stale_file = dst_sidecar / stale_rel
         if stale_file.is_file() or stale_file.is_symlink():
             stale_file.unlink()
+            removed.append(str(stale_file))
+    dst_tests = dst_sidecar / "tests"
+    if dst_tests.is_dir():
+        for cjs_test in dst_tests.glob("*.cjs"):
+            cjs_test.unlink()
+            removed.append(str(cjs_test))
+        src_tests = src_sidecar / "tests"
+        valid_mjs_tests = {p.name for p in src_tests.glob("*.mjs")} if src_tests.is_dir() else set()
+        for mjs_test in dst_tests.glob("*.mjs"):
+            if mjs_test.name not in valid_mjs_tests:
+                mjs_test.unlink()
+                removed.append(str(mjs_test))
     stale_fonts_dir = dst_sidecar / "assets" / "fonts"
     if stale_fonts_dir.exists():
         shutil.rmtree(stale_fonts_dir, ignore_errors=True)
+        removed.append(str(stale_fonts_dir))
     src_avatars_dir = src_sidecar / "assets" / "avatars"
     dst_avatars_dir = dst_sidecar / "assets" / "avatars"
     if dst_avatars_dir.is_dir():
@@ -156,9 +190,36 @@ def _prune_stale_sidecar_assets(src_sidecar: Path, dst_sidecar: Path) -> None:
         for candidate in dst_avatars_dir.glob("*.svg"):
             if candidate.name not in valid_svgs:
                 candidate.unlink()
+                removed.append(str(candidate))
+    return removed
 
 
-def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
+def _prune_stale_backend_files(src_backend: Path, dst_backend: Path) -> list[str]:
+    removed: list[str] = []
+    if not dst_backend.is_dir() or src_backend.resolve() == dst_backend.resolve():
+        return removed
+    valid_tests = {p.name for p in src_backend.glob("test_*.py")} if src_backend.is_dir() else set()
+    for stale_test in dst_backend.glob("test_*.py"):
+        if stale_test.name not in valid_tests:
+            stale_test.unlink()
+            removed.append(str(stale_test))
+    return removed
+
+
+def _prune_orphaned_session_tmps(target_dir: Path) -> int:
+    count = 0
+    if not target_dir.is_dir():
+        return 0
+    for tmp_file in target_dir.glob("active_antigravity_session*.tmp"):
+        try:
+            tmp_file.unlink()
+            count += 1
+        except OSError:
+            pass
+    return count
+
+
+def install_plugin(plugin_root: Path, target_dir: Path, *, install_hook: bool = True) -> dict:
     tools_dest = target_dir / "tools"
     tools_dest.mkdir(parents=True, exist_ok=True)
     copied_tools: list[str] = []
@@ -191,14 +252,17 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
     runtime_sidecar_src = plugin_root / "sidecars" / "think-tank"
     plugin_dest = target_dir / "plugins" / "team-orchestration-director"
     copied_plugin = False
+    pruned_files: list[str] = []
     if plugin_root.resolve() != plugin_dest.resolve():
         plugin_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(plugin_root, plugin_dest, dirs_exist_ok=True, ignore=_ignore_copy)
-        _prune_stale_sidecar_assets(runtime_sidecar_src, plugin_dest / "sidecars" / "think-tank")
+        pruned_files.extend(_prune_stale_sidecar_assets(runtime_sidecar_src, plugin_dest / "sidecars" / "think-tank"))
+        pruned_files.extend(_prune_stale_backend_files(plugin_root / "backend", plugin_dest / "backend"))
         for stale_rel in ("agents/_archived", "data-evidence-pack"):
             stale_path = plugin_dest / stale_rel
             if stale_path.exists():
                 shutil.rmtree(stale_path, ignore_errors=True)
+                pruned_files.append(str(stale_path))
         src_agents_dir = plugin_root / "agents"
         dst_agents_dir = plugin_dest / "agents"
         if src_agents_dir.is_dir() and dst_agents_dir.is_dir():
@@ -206,13 +270,23 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
             for stale_agent in dst_agents_dir.glob("*.md"):
                 if stale_agent.name not in valid_agents:
                     stale_agent.unlink()
+                    pruned_files.append(str(stale_agent))
         dst_commands_dir = plugin_dest / "commands"
         if dst_commands_dir.is_dir():
             valid_commands = {p.name for p in commands_src.glob("*.toml")} if commands_src.is_dir() else set()
             for stale_cmd in dst_commands_dir.glob("*.toml"):
                 if stale_cmd.name not in valid_commands:
                     stale_cmd.unlink()
+                    pruned_files.append(str(stale_cmd))
         copied_plugin = True
+
+    src_agents_dir = plugin_root / "agents"
+    global_agents_dir = target_dir / "agents"
+    if src_agents_dir.is_dir() and global_agents_dir.is_dir():
+        for src_agent in sorted(src_agents_dir.glob("*.md")):
+            dst_agent = global_agents_dir / src_agent.name
+            if src_agent.resolve() != dst_agent.resolve():
+                shutil.copy2(src_agent, dst_agent)
 
     runtime_root = target_dir / "thinktank"
     runtime_backend_src = plugin_root / "backend"
@@ -220,12 +294,13 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
     if runtime_backend_src.is_dir() and runtime_backend_src.resolve() != runtime_backend_dst.resolve():
         runtime_backend_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(runtime_backend_src, runtime_backend_dst, dirs_exist_ok=True, ignore=_ignore_copy)
+        pruned_files.extend(_prune_stale_backend_files(runtime_backend_src, runtime_backend_dst))
 
     runtime_sidecar_dst = runtime_root / "sidecars" / "think-tank"
     if runtime_sidecar_src.is_dir() and runtime_sidecar_src.resolve() != runtime_sidecar_dst.resolve():
         runtime_sidecar_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(runtime_sidecar_src, runtime_sidecar_dst, dirs_exist_ok=True, ignore=_ignore_copy)
-        _prune_stale_sidecar_assets(runtime_sidecar_src, runtime_sidecar_dst)
+        pruned_files.extend(_prune_stale_sidecar_assets(runtime_sidecar_src, runtime_sidecar_dst))
 
     runtime_root.mkdir(parents=True, exist_ok=True)
     runtime_meta_path = runtime_root / "runtime.json"
@@ -234,23 +309,26 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
         encoding="utf-8",
     )
 
+    pruned_tmp_count = _prune_orphaned_session_tmps(target_dir)
+
     hooks_installed = False
     hooks_error = None
     hooks_config = target_dir / "hooks.json"
-    try:
-        tools_dir_str = str((plugin_root / "tools").resolve())
-        if tools_dir_str not in sys.path:
-            sys.path.insert(0, tools_dir_str)
-        import install_antigravity_hook
+    if install_hook:
+        try:
+            tools_dir_str = str((plugin_root / "tools").resolve())
+            if tools_dir_str not in sys.path:
+                sys.path.insert(0, tools_dir_str)
+            import install_antigravity_hook
 
-        install_antigravity_hook.install(
-            config_path=hooks_config,
-            python_executable=sys.executable,
-            hook_script=tools_dest / "thinktank_antigravity_hook.py",
-        )
-        hooks_installed = True
-    except (ImportError, OSError, ValueError) as exc:
-        hooks_error = str(exc)
+            install_antigravity_hook.install(
+                config_path=hooks_config,
+                python_executable=sys.executable,
+                hook_script=tools_dest / "thinktank_antigravity_hook.py",
+            )
+            hooks_installed = True
+        except (ImportError, OSError, ValueError) as exc:
+            hooks_error = str(exc)
 
     db_compacted = None
     sync_db = target_dir / "think_tank_sync.sqlite3"
@@ -265,7 +343,7 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
                 backend_dir_str = str((plugin_root / "backend").resolve())
                 if backend_dir_str not in sys.path:
                     sys.path.insert(0, backend_dir_str)
-                from sync_store import SyncEventStore
+                from store import SyncEventStore
 
                 store = SyncEventStore(str(sync_db))
                 try:
@@ -275,7 +353,7 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
             except Exception as exc:
                 db_compacted = {"error": str(exc)}
 
-    result = {
+    result: dict = {
         "targetDir": str(target_dir),
         "pluginInstallPath": str(plugin_dest),
         "runtimeBackendPath": str(runtime_backend_dst),
@@ -285,13 +363,52 @@ def install_plugin(plugin_root: Path, target_dir: Path) -> dict:
         "bridgeTools": copied_tools,
         "copiedCommands": copied_commands,
         "hooksInstalled": hooks_installed,
+        "hooksSkipped": not install_hook,
         "hooksConfigPath": str(hooks_config),
+        "prunedFilesCount": len(pruned_files),
+        "prunedTmpFiles": pruned_tmp_count,
     }
     if db_compacted is not None:
         result["dbCompacted"] = db_compacted
     if hooks_error:
         result["hooksError"] = hooks_error
     return result
+
+
+def stop_backend(host: str, port: int) -> dict:
+    up, _ = check_backend_health(host, port, timeout=0.8)
+    if not up:
+        return {"stopped": False, "wasRunning": False, "url": f"http://{host}:{port}"}
+    killed_pids: list[int] = []
+    if os.name == "nt":
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -match 'uvicorn' -and $_.CommandLine -match 'app:app' -and $_.CommandLine -match '{port}' }} | "
+            "Select-Object -ExpandProperty ProcessId"
+        )
+        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, check=False)
+        for line in proc.stdout.splitlines():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False)
+                killed_pids.append(pid)
+    else:
+        proc = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, check=False)
+        for line in proc.stdout.splitlines():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed_pids.append(pid)
+                except OSError:
+                    pass
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        still_up, _ = check_backend_health(host, port, timeout=0.3)
+        if not still_up:
+            return {"stopped": True, "wasRunning": True, "pids": killed_pids, "url": f"http://{host}:{port}"}
+        time.sleep(0.15)
+    still_up, _ = check_backend_health(host, port, timeout=0.3)
+    return {"stopped": not still_up, "wasRunning": True, "pids": killed_pids, "url": f"http://{host}:{port}"}
 
 
 def start_backend(plugin_root: Path, host: str, port: int) -> dict:
@@ -320,21 +437,26 @@ def start_backend(plugin_root: Path, host: str, port: int) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="ThinkTank v3.0 Plugin Installer & Readiness Checker")
+    parser = argparse.ArgumentParser(description="ThinkTank v4.0 Plugin Installer & Readiness Checker")
     parser.add_argument("--check", action="store_true", help="Verify runtime dependencies, canonical agents, and files")
     parser.add_argument("--install", action="store_true", help="Sync bridge tools and plugin tree to Antigravity config dir")
+    parser.add_argument("--no-hook", action="store_true", help="Skip installing hooks.json entries during --install")
     parser.add_argument("--target-dir", default="", help="Override Antigravity config root (defaults to ~/.gemini/config)")
+    parser.add_argument("--stop-backend", action="store_true", help="Stop running ThinkTank backend on host:port")
     parser.add_argument("--start-backend", action="store_true", help="Start FastAPI backend if not already listening")
     parser.add_argument("--require-backend", action="store_true", help="Fail check if backend health endpoint is unreachable")
     parser.add_argument("--host", default="127.0.0.1", help="Backend bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8780, help="Backend bind port (default: 8780)")
     args = parser.parse_args()
 
-    if not (args.check or args.install or args.start_backend):
+    if not (args.check or args.install or args.start_backend or args.stop_backend):
         args.check = True
 
     plugin_root = get_plugin_root()
     report: dict = {}
+
+    if args.stop_backend:
+        report["stopBackend"] = stop_backend(args.host, args.port)
 
     if args.check or args.install:
         check_res = run_checks(plugin_root, args.host, args.port, require_backend=args.require_backend)
@@ -345,7 +467,7 @@ def main() -> int:
 
     if args.install:
         target_dir = Path(args.target_dir).expanduser().resolve() if args.target_dir else get_default_target_dir()
-        report["install"] = install_plugin(plugin_root, target_dir)
+        report["install"] = install_plugin(plugin_root, target_dir, install_hook=not args.no_hook)
 
     if args.start_backend:
         report["backend"] = start_backend(plugin_root, args.host, args.port)

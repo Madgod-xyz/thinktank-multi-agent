@@ -1,5 +1,8 @@
 {
   "name": "think-tank-matrix-sidecar",
-  "version": "3.0.0",
-  "type": "module"
+  "version": "4.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/v4-ui-contract.test.mjs tests/v4-i18n-parity.test.mjs tests/v4-topology-sync.test.mjs"
+  }
 }

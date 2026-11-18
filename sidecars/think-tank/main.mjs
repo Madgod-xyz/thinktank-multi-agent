@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,7 @@ import { Response, SidecarApp } from 'sidecar_sdk';
 import { backendProjectHeaders } from './backend-headers.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const app = new SidecarApp();
 const API = 'http://127.0.0.1:8780/api';
 const PLUGIN_BACKEND_DIR = join(HERE, '..', '..', 'backend');
@@ -16,6 +18,7 @@ const GLOBAL_BACKEND_DIR = join(
 );
 const BACKEND_DIR = process.env.THINKTANK_BACKEND_DIR
   || (existsSync(join(PLUGIN_BACKEND_DIR, 'app.py')) ? PLUGIN_BACKEND_DIR : GLOBAL_BACKEND_DIR);
+
 let backendStartup = null;
 let lastBackendHealthyAt = 0;
 const HEALTH_CACHE_TTL_MS = 4000;
@@ -41,14 +44,15 @@ function normalizeWorkspaceUri(raw) {
   return val;
 }
 
-function getActiveSessionContext() {
-  const workspaceUri = typeof normalizeWorkspaceUri === 'function' ? normalizeWorkspaceUri(arguments[0]) : '';
+function getActiveSessionContext(rawWorkspaceUri = '') {
+  const workspaceUri = normalizeWorkspaceUri(rawWorkspaceUri);
   const configDir = (process.env.GEMINI_CONFIG_DIR || '').trim()
     || join(process.env.USERPROFILE || process.env.HOME || homedir(), '.gemini', 'config');
   const envCid = String(app.config?.conversationId || '').trim();
   let cid = envCid && envCid !== 'default' ? envCid : '';
   let pid = app.config?.projectId || '';
   let workspaceMatched = true;
+
   if (!cid) {
     try {
       const activeFile = join(configDir, 'active_antigravity_session.json');
@@ -59,9 +63,7 @@ function getActiveSessionContext() {
           cid = String(wsEntry.conversationId).trim();
           pid = wsEntry.projectId || pid;
         } else {
-          const activeWs = typeof normalizeWorkspaceUri === 'function'
-            ? normalizeWorkspaceUri(d?.workspaceUri || '')
-            : '';
+          const activeWs = normalizeWorkspaceUri(d?.workspaceUri || '');
           if (workspaceUri && activeWs && activeWs !== workspaceUri) {
             cid = '';
             workspaceMatched = false;
@@ -73,6 +75,7 @@ function getActiveSessionContext() {
       }
     } catch (_) {}
   }
+
   if (cid) {
     try {
       const linksFile = join(configDir, 'subagent_links.json');
@@ -83,12 +86,13 @@ function getActiveSessionContext() {
       }
     } catch (_) {}
   }
+
   return { conversationId: cid, convId: cid, projectId: pid, workspaceUri, workspaceMatched };
 }
 
-// 1. Root and Core Static Assets
 const serveRoot = () => {
-  let html = readLocal('index.html');
+  ensureBackendRunning().catch(() => {});
+  const html = readLocal('index.html');
   const ctx = getActiveSessionContext();
   const hostCid = ctx.conversationId;
   const hostPid = ctx.projectId;
@@ -113,81 +117,128 @@ const serveRoot = () => {
 
 app.page('/', serveRoot);
 app.page('/index.html', serveRoot);
+app.page('/think-tank/', serveRoot);
+app.page('/think-tank/index.html', serveRoot);
 
-for (const [route, file, contentType] of [
-  ['/app.css', 'app.css', 'text/css'],
-  ['/fonts.css', 'fonts.css', 'text/css'],
-  ['/i18n.js', 'i18n.js', 'application/javascript'],
-  ['/activity.js', 'activity.js', 'application/javascript'],
-  ['/app.js', 'app.js', 'application/javascript'],
-  ['/conversation-context.mjs', 'conversation-context.mjs', 'application/javascript'],
-  ['/ui-preferences.mjs', 'ui-preferences.mjs', 'application/javascript'],
-]) {
-  if (existsSync(join(HERE, file))) {
-    const handler = () => new Response(readLocal(file), {
-      contentType,
-      headers: {
-        'Content-Type': contentType,
-        'Cache-Control': file === 'fonts.css' ? 'public, max-age=3600' : 'no-cache',
-      },
-    });
-    app.page(route, handler);
-    app.page(`/think-tank${route}`, handler);
+const registeredPageRoutes = new Set();
+function registerTextAsset(route, relPath, contentType, cacheControl = 'no-cache') {
+  if (registeredPageRoutes.has(route)) return;
+  const full = join(HERE, relPath);
+  registeredPageRoutes.add(route);
+  const handler = () => new Response(readFileSync(full, 'utf8'), {
+    contentType,
+    headers: {
+      'Content-Type': contentType,
+      'Cache-Control': cacheControl,
+    },
+  });
+  app.page(route, handler);
+  app.page(`/think-tank${route}`, handler);
+}
+
+registerTextAsset('/fonts.css', 'fonts.css', 'text/css; charset=utf-8', 'public, max-age=3600');
+registerTextAsset('/tokens.css', 'tokens.css', 'text/css; charset=utf-8');
+registerTextAsset('/app.css', 'app.css', 'text/css; charset=utf-8');
+registerTextAsset('/backend-headers.mjs', 'backend-headers.mjs', 'application/javascript; charset=utf-8');
+registerTextAsset('/role_catalog.json', 'role_catalog.json', 'application/json; charset=utf-8');
+
+app.page('/think-tank/preload.js', () => {
+  let preloadPath = join(HERE, 'preload.js');
+  try {
+    preloadPath = require.resolve('sidecar_sdk/preload.js');
+  } catch (_) {}
+  return new Response(readFileSync(preloadPath, 'utf8'), {
+    contentType: 'application/javascript; charset=utf-8',
+    headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+  });
+});
+
+app.page('/favicon.ico', () => new Response(readFileSync(join(HERE, 'assets', 'thinktank-logo.svg')), {
+  contentType: 'image/svg+xml',
+  headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' },
+}));
+
+const coreModules = [
+  'src/app.mjs',
+  'src/i18n.mjs',
+  'src/roles.mjs',
+  'src/store.mjs',
+  'src/dom.mjs',
+  'src/sync.mjs',
+  'src/inspector.mjs',
+  'src/boards/command-board.mjs',
+  'src/boards/topology-board.mjs',
+  'src/boards/chronicle-board.mjs',
+  'src/boards/squad-board.mjs',
+];
+for (const relPath of coreModules) {
+  registerTextAsset(`/${relPath}`, relPath, 'application/javascript; charset=utf-8');
+}
+for (const subDir of ['src', join('src', 'boards')]) {
+  const absDir = join(HERE, subDir);
+  if (!existsSync(absDir)) continue;
+  for (const name of readdirSync(absDir)) {
+    if (!name.endsWith('.mjs') && !name.endsWith('.js')) continue;
+    const relPath = join(subDir, name);
+    registerTextAsset(`/${relPath.replace(/\\/g, '/')}`, relPath, 'application/javascript; charset=utf-8');
   }
 }
 
-// 2. Local Fonts
-for (const [route, file] of [
-  ['/fonts/Outfit-VariableFont_wght.ttf', 'fonts/Outfit-VariableFont_wght.ttf'],
-  ['/fonts/Vazirmatn-Regular.ttf', 'fonts/Vazirmatn-Regular.ttf'],
-  ['/fonts/Vazirmatn-Bold.ttf', 'fonts/Vazirmatn-Bold.ttf'],
-]) {
-  if (existsSync(join(HERE, file))) {
-    app.page(route, () => new Response(readFileSync(join(HERE, file)), {
-      contentType: 'font/ttf',
+const fontsDir = join(HERE, 'fonts');
+if (existsSync(fontsDir)) {
+  for (const name of readdirSync(fontsDir)) {
+    if (!name.endsWith('.ttf') && !name.endsWith('.woff2')) continue;
+    const file = join(fontsDir, name);
+    const ct = name.endsWith('.woff2') ? 'font/woff2' : 'font/ttf';
+    const handler = () => new Response(readFileSync(file), {
+      contentType: ct,
       headers: {
-        'Content-Type': 'font/ttf',
+        'Content-Type': ct,
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'public, max-age=31536000, immutable',
       },
-    }));
+    });
+    app.page(`/fonts/${name}`, handler);
+    app.page(`/think-tank/fonts/${name}`, handler);
   }
 }
 
-// 3. Assets & Avatars
 const assetsDir = join(HERE, 'assets');
 if (existsSync(assetsDir)) {
   for (const name of readdirSync(assetsDir)) {
     if (name.endsWith('.svg') || name.endsWith('.png') || name.endsWith('.ico')) {
       const file = join(assetsDir, name);
       const ct = name.endsWith('.svg') ? 'image/svg+xml' : (name.endsWith('.png') ? 'image/png' : 'image/x-icon');
-      app.page(`/assets/${name}`, () => new Response(readFileSync(file), {
+      const handler = () => new Response(readFileSync(file), {
         contentType: ct,
         headers: {
           'Content-Type': ct,
           'Cache-Control': 'public, max-age=86400',
         },
-      }));
-    }
-  }
-}
-const avatarsDir = join(HERE, 'assets', 'avatars');
-if (existsSync(avatarsDir)) {
-  for (const name of readdirSync(avatarsDir)) {
-    if (name.endsWith('.svg')) {
-      const file = join(avatarsDir, name);
-      app.page(`/assets/avatars/${name}`, () => new Response(readFileSync(file, 'utf8'), {
-        contentType: 'image/svg+xml',
-        headers: {
-          'Content-Type': 'image/svg+xml',
-          'Cache-Control': 'public, max-age=86400',
-        },
-      }));
+      });
+      app.page(`/assets/${name}`, handler);
+      app.page(`/think-tank/assets/${name}`, handler);
     }
   }
 }
 
-// 4. Role Catalog
+const avatarsDir = join(HERE, 'assets', 'avatars');
+if (existsSync(avatarsDir)) {
+  for (const name of readdirSync(avatarsDir)) {
+    if (!name.endsWith('.svg')) continue;
+    const file = join(avatarsDir, name);
+    const handler = () => new Response(readFileSync(file, 'utf8'), {
+      contentType: 'image/svg+xml',
+      headers: {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=86400',
+      },
+    });
+    app.page(`/assets/avatars/${name}`, handler);
+    app.page(`/think-tank/assets/avatars/${name}`, handler);
+  }
+}
+
 let roleCatalog = [];
 const catalogPath = join(HERE, 'role_catalog.json');
 if (existsSync(catalogPath)) {
@@ -200,7 +251,6 @@ if (existsSync(catalogPath)) {
 app.api('/api/roles', () => ({ roles: roleCatalog }), 'GET');
 app.api('/roles', () => ({ roles: roleCatalog }), 'GET');
 
-// 5. Host Context
 const resolveHostContextHandler = async (data) => {
   const wsUri = normalizeWorkspaceUri(data?.workspaceUri || data?.workspace || '');
   const envCid = String(app.config?.conversationId || '').trim();
@@ -215,7 +265,6 @@ const resolveHostContextHandler = async (data) => {
 app.api('/api/host/context', resolveHostContextHandler, 'GET');
 app.api('/host/context', resolveHostContextHandler, 'GET');
 
-// 6. Backend Forwarding
 async function forward(path, method, data) {
   try {
     const backend = await ensureBackendRunning();
@@ -224,11 +273,11 @@ async function forward(path, method, data) {
     const response = await fetch(`${API}${path}`, {
       method,
       headers: {
-        ...backendProjectHeaders(app.config.projectId),
+        ...backendProjectHeaders(app.config?.projectId),
         ...(data ? { 'Content-Type': 'application/json', 'X-ThinkTank-Event-Id': eventId } : {}),
       },
       body: data ? JSON.stringify(data) : undefined,
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(10000),
     });
     const body = await response.json().catch(() => ({}));
     return response.ok ? body : {
@@ -283,14 +332,14 @@ async function ensureBackendRunning() {
     return { ok: false, error: 'Backend auto-start is disabled.' };
   }
   if (!existsSync(join(BACKEND_DIR, 'app.py'))) {
-    return { ok: false, error: `ThinkTank backend was not found at ${BACKEND_DIR}.` };
+    return { ok: false, error: 'ThinkTank backend app.py was not found.' };
   }
   if (!backendStartup) {
     backendStartup = (async () => {
       try {
         const python = resolveBackendPython();
         const child = spawn(python, [
-          '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', '8780',
+          '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', '8780', '--no-use-colors',
         ], {
           cwd: BACKEND_DIR,
           detached: true,
@@ -314,8 +363,7 @@ async function ensureBackendRunning() {
   return backendStartup;
 }
 
-// 7. GET & Status Query Endpoints
-for (const endpoint of ['/status', '/conversations', '/telemetry']) {
+for (const endpoint of ['/status', '/conversations', '/telemetry', '/health']) {
   const handleGetEndpoint = async (data) => {
     const wsUri = normalizeWorkspaceUri(data?.workspaceUri || data?.workspace || '');
     const explicitCid = data?.convId || data?.conversationId || '';
@@ -350,7 +398,6 @@ const handleStatusQuery = async (data) => {
 app.api('/api/status/query', handleStatusQuery, 'POST');
 app.api('/status/query', handleStatusQuery, 'POST');
 
-// 8. Host Send Message
 app.api('/api/host/send-message', async (data) => {
   const convId = String(data?.convId || '').trim();
   const prompt = String(data?.prompt || '').trim();
@@ -369,7 +416,6 @@ app.api('/api/host/send-message', async (data) => {
   }
 }, 'POST');
 
-// 9. Governance Review Decision Dispatch
 app.api('/api/governance/review_decision', async (data) => {
   const convId = String(data?.convId || '').trim();
   const decision = String(data?.decision || '').trim();
@@ -393,28 +439,15 @@ app.api('/api/governance/review_decision', async (data) => {
   }
 }, 'POST');
 
-// 10. POST Endpoints
 const postRoutes = [
-  '/api/agent/update',
-  '/api/agent/collaborate',
-  '/api/task/update',
-  '/api/subtasks/upsert',
-  '/api/proposal/update',
-  '/api/proposal/action',
-  '/api/proposal/vote',
-  '/api/chat/send',
-  '/api/messages/send',
-  '/api/governance/extend_rounds',
-  '/api/governance/reopen',
-  '/api/governance/compress_final',
-  '/api/governance/review_dispatch',
-  '/api/governance/review_decision_dispatch',
-  '/api/governance/submit_review',
-  '/api/findings/action',
-  '/api/telemetry/host_tool',
-  '/api/telemetry/tool_call',
-  '/api/telemetry/terminal_log',
-  '/api/telemetry/task',
+  '/api/host/active-session', '/api/agent/update', '/api/agent/collaborate',
+  '/api/task/update', '/api/subtasks/upsert', '/api/proposal/update',
+  '/api/proposal/action', '/api/proposal/vote', '/api/chat/send',
+  '/api/messages/send', '/api/governance/extend_rounds', '/api/governance/reopen',
+  '/api/governance/compress_final', '/api/governance/review_dispatch',
+  '/api/governance/review_decision_dispatch', '/api/governance/submit_review',
+  '/api/findings/action', '/api/telemetry/host_tool', '/api/telemetry/tool_call',
+  '/api/telemetry/terminal_log', '/api/telemetry/task', '/api/tools/execute',
 ];
 
 for (const route of postRoutes) {
@@ -426,4 +459,5 @@ for (const route of postRoutes) {
 app.api('/api/dispatch', (data) => forward('/tools/execute', 'POST', data || {}), 'POST');
 app.api('/dispatch', (data) => forward('/tools/execute', 'POST', data || {}), 'POST');
 
+ensureBackendRunning().catch(() => {});
 app.run();

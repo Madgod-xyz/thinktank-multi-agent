@@ -26,11 +26,11 @@ When the user tags `@<agent-name>` directly, invoke that canonical subagent imme
 
 ## Built-in `/ThinkTank`, `/thinktank`, and `/ ThinkTank` Launch Commands
 When the user invokes `/ThinkTank`, `/thinktank`, or `/ ThinkTank` (both `/thinktank` and `/ThinkTank` resolve through the bundled `skills/thinktank/SKILL.md` skill and `commands/thinktank.toml`):
-- Start an isolated ThinkTank v3 run via `thinktank_bridge.py set-task --new-run` (and log `triage --chosen thinktank`), archiving any prior closed or active work cleanly (`--run-N`) with zero cross-run bleed.
+- Start an isolated ThinkTank v4.0 run via `thinktank_bridge.py set-task --new-run` (and log `triage --chosen thinktank`), archiving any prior closed or active work cleanly (`--run-N`) with zero cross-run bleed.
 - Spawn real subagents from the canonical 7+1 roster via `invoke_subagent` and surface `[Live Think Tank](sidecar://team-orchestration-director/think-tank/)`.
 
-## ThinkTank v3 Case Ledger & 5-Stage Closed-Loop Finding Lifecycle
-The sidecar UI renders a **Case Ledger** across **3 views** (`Flow`, `Map & Replay`, `Team`) plus a **Settings sheet** (and a read-only Closure Receipt when completed). Every defect is tracked as a numbered **Finding (`F-01`..)** through strict backend-enforced gates:
+## ThinkTank v4.0 Case Ledger & 5-Stage Closed-Loop Finding Lifecycle
+The sidecar UI renders a **Case Ledger** across **4 specialized boards** (`Command & WBS`, `Topology & Flow`, `Sequence & Chronicle`, `Squad & Telemetry`) plus a **Contextual Dossier Drawer**, **Settings sheet**, and read-only **Closure Receipt** when completed. Every defect is tracked as a numbered **Finding (`F-01`..)** through strict backend-enforced gates:
 1. **WBS & File Locks (`team-manager`):** Decompose work via `assign-subtask` with single-owner `--files` locks (HTTP 409 on cross-assignee conflict) and explicit `--acceptance` criteria.
 2. **Implementation (`workers`):** Specialists implement and run `PEER_SYNC` on `#sync`; user composer remains strictly user-only (never impersonate agents).
 3. **Critic -> Worker Finding Fix (`council-critic` -> `workers`):** Under the fixed Severity Rubric (`CRITICAL`, `HIGH`, `MEDIUM`), max **7 ranked findings** per round, and audit scope restricted to touched diff + connected files, every defect is returned via `return-defect --repro "..."` (creating/reopening `F-xx`). The worker fixes the root cause and hands off via `worker-fix --finding F-xx` (`InReview`). Withdrawing a finding requires `WontFix` with a non-empty reason (`/api/findings/action`).

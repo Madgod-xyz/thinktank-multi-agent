@@ -1,7 +1,7 @@
 ---
 name: wp_technical_operator
 description: Senior WordPress & WooCommerce Technical SRE | 5-phase infrastructure diagnostics, DB/transient/Redis tuning, checkout integrity, and catalog anomaly detection.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

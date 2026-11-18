@@ -1,501 +1,199 @@
-<!DOCTYPE html>
-<html lang="fa" dir="rtl" data-theme="dark" class="dark">
+<!doctype html>
+<html lang="fa" dir="rtl" data-mode="dark" data-theme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>دفتر پرونده | اتاق فکر</title>
-  <link rel="stylesheet" href="/fonts.css" />
-  <link rel="stylesheet" href="/app.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Think Tank Studio</title>
+  <meta name="description" content="دفتر مهندسی مدیریت پرونده، تفکیک تسک‌های WBS، چرخه یافته‌ها و توپولوژی زنده تیم اتاق فکر">
+  <script src="/preload.js"></script>
+  <script>
+    (function () {
+      var root = document.documentElement;
+      root.classList.add('js');
+      try {
+        var mode = localStorage.getItem('tt_v4_theme') || 'dark';
+        if (mode !== 'light' && mode !== 'dark') mode = 'dark';
+        root.dataset.mode = mode;
+        root.dataset.theme = mode;
+        var lang = localStorage.getItem('tt_v4_lang') || 'fa';
+        if (lang !== 'fa' && lang !== 'en') lang = 'fa';
+        root.lang = lang;
+        root.dir = lang === 'en' ? 'ltr' : 'rtl';
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="fonts.css">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <div id="role-hover-tooltip" class="role-hover-tooltip hidden" role="tooltip" aria-hidden="true"></div>
-
-  <div class="tt-shell" id="tt-shell">
-    <!-- 48px Case Header -->
-    <header id="tt-header" class="tt-header">
-      <div class="tt-header-brand">
-        <span class="tt-brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="14" height="14" rx="2"></rect>
-            <path d="M6.5 7.5h7M6.5 10.5h7M6.5 13.5h4.5"></path>
-          </svg>
-        </span>
-        <div class="tt-header-titles">
-          <strong id="header-case-title" class="tt-header-title" data-tt-dynamic="true">اتاق فکر</strong>
-          <span id="header-project-subtitle" class="tt-header-sub hidden" data-tt-dynamic="true"></span>
-        </div>
+  <div class="studio-shell" id="studio-shell">
+    <header class="studio-header sticky-pin" id="studio-header">
+      <div class="header-start">
+        <img class="brand-logo" src="assets/thinktank-logo.svg" alt="" width="20" height="20" fetchpriority="high" aria-hidden="true">
+        <h1 class="case-title" id="header-case-title">اتاق فکر مهندسی</h1>
+        <span class="conn-badge" id="header-conn-badge" role="status" aria-live="polite">در حال همگام‌سازی</span>
       </div>
 
-      <div class="tt-header-controls">
-        <div class="tt-conn-status" id="conn-pill" data-i18n-attr="title:app.live">
-          <span class="live-pulse-dot" id="ws-status-dot" aria-hidden="true"></span>
-          <span id="ws-status-label" data-tt-dynamic="true">در حال اتصال</span>
-        </div>
+      <div class="header-runs">
+        <div class="run-switcher" id="header-run-pills" role="group" aria-label="اجراهای ایزوله پرونده"></div>
+        <button type="button" class="btn btn-quiet btn-compact" id="btn-new-run">اجرای جدید</button>
+      </div>
 
-        <button type="button" id="btn-settings-sheet" class="tt-icon-btn" aria-haspopup="dialog" aria-controls="settings-sheet" title="تنظیمات پرونده" aria-label="تنظیمات پرونده" data-i18n-attr="title:app.settings,aria-label:app.settings">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="5" cy="10" r="1.2" fill="currentColor"></circle>
-            <circle cx="10" cy="10" r="1.2" fill="currentColor"></circle>
-            <circle cx="15" cy="10" r="1.2" fill="currentColor"></circle>
+      <div class="header-end">
+        <button type="button" class="btn btn-quiet btn-compact" id="btn-case-switcher" aria-haspopup="dialog">پرونده‌ها</button>
+        <button type="button" class="btn btn-quiet btn-compact" id="btn-lang-toggle" aria-label="تغییر زبان رابط">EN</button>
+        <button type="button" class="btn btn-quiet btn-icon" id="btn-theme-toggle" aria-label="تغییر حالت روشن و تیره">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8.4 2a5.8 5.8 0 1 0 5.6 7.4A4.6 4.6 0 0 1 8.4 2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button type="button" class="btn btn-quiet btn-icon" id="btn-open-settings" aria-haspopup="dialog" aria-label="تنظیمات پرونده">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
           </svg>
         </button>
       </div>
     </header>
 
-    <!-- Empty Session Screen (Displayed when current conversation has no case) -->
-    <section id="empty-session-screen" class="empty-session-screen" aria-live="polite">
-      <div class="empty-session-card">
-        <div class="empty-session-art" aria-hidden="true">
-          <svg viewBox="0 0 120 48" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="12" y="12" width="24" height="24" rx="3" stroke="var(--review)"></rect>
-            <polygon points="60,10 74,24 60,38 46,24" stroke="var(--working)"></polygon>
-            <circle cx="98" cy="24" r="12" stroke="var(--verified)"></circle>
-            <path d="M36 24h10M74 24h12" stroke="var(--ink-muted)" stroke-dasharray="3 3"></path>
-          </svg>
-        </div>
-        <span class="empty-state-badge" data-i18n="empty.badge">آماده</span>
-        <h1 class="empty-session-title" data-i18n="empty.title">این گفت‌وگو پرونده‌ای ندارد</h1>
-        <p class="empty-session-desc" data-i18n="empty.desc">با شروع کار چندایجنتی یا واگذاری وظیفه در این گفت‌وگو، پرونده به‌طور خودکار ثبت می‌شود.</p>
-        <div id="empty-dev-meta" class="empty-session-meta hidden">
-          <span data-i18n="empty.convIdLabel">شناسه گفت‌وگو:</span>
-          <code id="empty-conv-badge" class="mono-id" data-tt-dynamic="true">—</code>
-        </div>
+    <div class="offline-banner" id="offline-banner" role="alert" hidden>
+      <span class="offline-text" id="offline-banner-text">ارتباط با سرویس محلی اتاق فکر قطع شده است.</span>
+      <button type="button" class="btn btn-quiet btn-compact" id="btn-retry-sync">تلاش مجدد</button>
+    </div>
+
+    <div class="pipeline-ribbon" id="pipeline-ribbon" role="region" aria-label="پنج مرحله حاکمیتی پرونده">
+      <ol class="pipeline-steps" id="pipeline-steps">
+        <li class="pipe-step" data-stage="1"><span class="pipe-num">1</span><span class="pipe-name" data-stage-label="1">تفکیک WBS</span></li>
+        <li class="pipe-step" data-stage="2"><span class="pipe-num">2</span><span class="pipe-name" data-stage-label="2">پیاده‌سازی و سینک</span></li>
+        <li class="pipe-step" data-stage="3"><span class="pipe-num">3</span><span class="pipe-name" data-stage-label="3">ممیزی نقاد</span></li>
+        <li class="pipe-step" data-stage="4"><span class="pipe-num">4</span><span class="pipe-name" data-stage-label="4">بازبینی و تست QA</span></li>
+        <li class="pipe-step" data-stage="5"><span class="pipe-num">5</span><span class="pipe-name" data-stage-label="5">بستن قطعی</span></li>
+      </ol>
+      <div class="pipeline-metrics" id="pipeline-metrics">
+        <span class="metric-item" id="metric-round">دور 1 از 50</span>
+        <span class="metric-item" id="metric-open-findings">0 ایراد باز</span>
+        <span class="metric-item code-id" id="metric-seq">#0</span>
+      </div>
+    </div>
+
+    <nav class="board-nav" aria-label="بوردهای تخصصی پرونده">
+      <div class="board-tablist" id="board-tablist" role="tablist" aria-orientation="horizontal">
+        <button type="button" class="tab-btn" role="tab" id="tab-command" data-board="command" aria-controls="panel-command" aria-selected="true" tabindex="0">میدان فرماندهی</button>
+        <button type="button" class="tab-btn" role="tab" id="tab-topology" data-board="topology" aria-controls="panel-topology" aria-selected="false" tabindex="-1">توپولوژی و بازپخش</button>
+        <button type="button" class="tab-btn" role="tab" id="tab-chronicle" data-board="chronicle" aria-controls="panel-chronicle" aria-selected="false" tabindex="-1">توالی و مکالمات</button>
+        <button type="button" class="tab-btn" role="tab" id="tab-squad" data-board="squad" aria-controls="panel-squad" aria-selected="false" tabindex="-1">تیم و تله‌متری</button>
+      </div>
+    </nav>
+
+    <div class="state-skeleton" id="state-loading" aria-busy="true" aria-live="polite">
+      <div class="skel-bar skel-bar-wide"></div>
+      <div class="skel-grid">
+        <div class="skel-box"></div>
+        <div class="skel-box"></div>
+      </div>
+      <div class="skel-bar"></div>
+      <div class="skel-bar"></div>
+    </div>
+
+    <div class="state-empty" id="state-empty" hidden>
+      <div class="empty-plate surface-plate">
+        <h2 class="empty-title" id="empty-title">پرونده فعالی برای این فضا باز نشده است</h2>
+        <p class="empty-desc" id="empty-desc">برای شروع چرخه مهندسی، یک پرونده جدید بسازید یا تب گفتگوی فعال را همگام کنید.</p>
         <div class="empty-actions">
-          <button type="button" id="btn-init-session" class="tt-btn">
-            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M10 4v12M4 10h12"></path>
-            </svg>
-            <span data-i18n="empty.initBtn">ساخت دستی پرونده</span>
-          </button>
-          <button type="button" id="btn-sync-host-session" class="tt-btn tt-btn-ghost">
-            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M4 10a6 6 0 0 1 10.2-4.2L16 7.5M16 4v3.5h-3.5M16 10a6 6 0 0 1-10.2 4.2L4 12.5M4 16v-3.5h3.5"></path>
-            </svg>
-            <span data-i18n="empty.syncBtn">همگام‌سازی تب فعال</span>
-          </button>
+          <button type="button" class="btn btn-primary" id="btn-empty-create">ایجاد پرونده</button>
+          <button type="button" class="btn btn-quiet" id="btn-empty-sync">همگام‌سازی تب فعال</button>
         </div>
-        <div id="empty-active-sessions" class="empty-active-sessions hidden" data-tt-dynamic="true"></div>
-      </div>
-    </section>
-
-    <!-- Active Workspace Shell (Hidden until case exists) -->
-    <div id="active-workspace-shell" class="active-workspace-shell hidden">
-      <!-- Exactly 3 ARIA Tabs -->
-      <nav class="primary-nav" role="tablist" aria-label="نماهای پرونده" data-i18n-attr="aria-label:nav.ariaLabel">
-        <button type="button" role="tab" id="nav-tab-flow" class="nav-tab is-active" data-tab="flow" aria-controls="tab-flow" aria-selected="true" tabindex="0">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 5h12M4 10h12M4 15h8"></path>
-          </svg>
-          <span data-i18n="nav.flow">جریان</span>
-        </button>
-        <button type="button" role="tab" id="nav-tab-map" class="nav-tab" data-tab="map" aria-controls="tab-map" aria-selected="false" tabindex="-1">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M5 4v12M10 4v12M15 4v12"></path>
-            <path d="M5 7h5M10 12h5"></path>
-          </svg>
-          <span data-i18n="nav.map">نقشه و بازپخش</span>
-        </button>
-        <button type="button" role="tab" id="nav-tab-team" class="nav-tab" data-tab="team" aria-controls="tab-team" aria-selected="false" tabindex="-1">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="7.5" cy="7" r="2.5"></circle>
-            <circle cx="14" cy="8" r="2"></circle>
-            <path d="M3 16a4.5 4.5 0 0 1 9 0M12.5 16a3.2 3.2 0 0 1 4.5-2.8"></path>
-          </svg>
-          <span data-i18n="nav.team">تیم</span>
-        </button>
-      </nav>
-
-      <div id="run-history-bar" class="run-history-bar hidden" role="region" aria-label="اجراهای این گفت‌وگو" data-i18n-attr="aria-label:header.runsTitle">
-        <div id="run-history-pills" class="run-history-pills" data-tt-dynamic="true"></div>
-        <button type="button" id="btn-new-run" class="tt-btn tt-compact-btn" data-i18n="header.newRun">اجرای جدید</button>
-      </div>
-
-      <div class="workspace-grid">
-        <main class="tt-main">
-          <!-- VIEW 1: FLOW (Default) -->
-          <section id="tab-flow" class="tab-panel" role="tabpanel" aria-labelledby="nav-tab-flow">
-            <!-- Now Strip (max 3 active items + awaiting user + decision box) -->
-            <section id="now-strip" class="ledger-section now-strip">
-              <div class="section-head">
-                <h2 data-i18n="flow.now.title">الان</h2>
-                <span id="triage-badge" class="meta-note hidden" data-tt-dynamic="true"></span>
-              </div>
-              <div id="now-activities" class="now-activities" data-tt-dynamic="true"></div>
-              <div id="awaiting-user-box" class="awaiting-user-box hidden" aria-live="polite" data-tt-dynamic="true"></div>
-              <div id="decision-box" class="decision-box hidden" data-tt-dynamic="true"></div>
-            </section>
-
-            <!-- Process Progress Bars (Findings + WBS clickable segment filters) -->
-            <section id="process-bars-card" class="ledger-section process-bars-card">
-              <div class="progress-bar-row">
-                <span class="progress-bar-label" data-i18n="flow.bars.findingsLabel">یافته‌ها</span>
-                <div id="findings-progress-bar" class="segment-bar-group" role="group" aria-label="یافته‌ها" data-i18n-attr="aria-label:flow.bars.findingsLabel"></div>
-              </div>
-              <div class="progress-bar-row">
-                <span class="progress-bar-label" data-i18n="flow.bars.wbsLabel">کارهای WBS</span>
-                <div id="wbs-progress-bar" class="segment-bar-group" role="group" aria-label="کارهای WBS" data-i18n-attr="aria-label:flow.bars.wbsLabel"></div>
-              </div>
-            </section>
-
-            <!-- Findings Section -->
-            <section id="findings-section" class="ledger-section">
-              <div class="section-head">
-                <div class="section-title-group">
-                  <h2 data-i18n="flow.findings.title">یافته‌ها</h2>
-                  <span id="findings-total-count" class="meta-note mono-id" data-tt-dynamic="true">0</span>
-                </div>
-                <button type="button" id="btn-clear-finding-filter" class="tt-btn tt-btn-ghost tt-compact-btn hidden" data-i18n="flow.bars.clearFilter">حذف فیلتر</button>
-              </div>
-              <div id="findings-list" class="ledger-list" data-tt-dynamic="true"></div>
-              <details id="verified-findings-drawer" class="ledger-drawer hidden">
-                <summary class="ledger-drawer-summary">
-                  <span data-i18n="flow.findings.verifiedDrawer">تأییدشده و بسته‌شده</span>
-                  <span id="verified-findings-count" class="meta-note mono-id" data-tt-dynamic="true">0</span>
-                </summary>
-                <div id="verified-findings-list" class="ledger-list" data-tt-dynamic="true"></div>
-              </details>
-            </section>
-
-            <!-- WBS Section (Read-Only) -->
-            <section id="wbs-section" class="ledger-section">
-              <div class="section-head">
-                <div class="section-title-group">
-                  <h2 data-i18n="flow.wbs.title">کارهای WBS</h2>
-                  <span id="wbs-total-count" class="meta-note mono-id" data-tt-dynamic="true">0</span>
-                </div>
-                <button type="button" id="btn-clear-wbs-filter" class="tt-btn tt-btn-ghost tt-compact-btn hidden" data-i18n="flow.bars.clearFilter">حذف فیلتر</button>
-              </div>
-              <div id="wbs-list" class="ledger-list" data-tt-dynamic="true"></div>
-            </section>
-
-            <!-- Event Ledger Section -->
-            <section id="event-ledger-section" class="ledger-section">
-              <div class="section-head">
-                <h2 data-i18n="flow.ledger.title">دفتر رویدادها</h2>
-                <input id="board-search" type="search" class="tt-input tt-input-compact ledger-search" placeholder="جستجو در #seq، شناسه یافته یا متن…" data-i18n-attr="placeholder:flow.ledger.searchPlaceholder" />
-              </div>
-              <div class="channel-bar" role="group" aria-label="فیلتر رویدادها">
-                <button type="button" class="chip-btn is-active" data-channel="ALL" data-i18n="flow.ledger.filter.ALL">همه</button>
-                <button type="button" class="chip-btn" data-channel="FINDINGS" data-i18n="flow.ledger.filter.FINDINGS">یافته‌ها</button>
-                <button type="button" class="chip-btn" data-channel="QA" data-i18n="flow.ledger.filter.QA">QA</button>
-                <button type="button" class="chip-btn" data-channel="SYNC" data-i18n="flow.ledger.filter.SYNC">سینک</button>
-                <button type="button" class="chip-btn" data-channel="TASKS" data-i18n="flow.ledger.filter.TASKS">WBS</button>
-                <button type="button" class="chip-btn" data-channel="USER" data-i18n="flow.ledger.filter.USER">پیام‌های من</button>
-              </div>
-              <div id="messages-feed" class="ledger-list" data-tt-dynamic="true"></div>
-            </section>
-
-            <!-- User-Only Composer (NO 8-mode impersonation) -->
-            <form id="user-composer-form" class="ledger-section user-composer-form">
-              <div class="composer-meta-row">
-                <span class="composer-sender-label">
-                  <span data-i18n="flow.composer.senderLabel">فرستنده:</span>
-                  <strong data-i18n="flow.composer.senderYou">شما</strong>
-                </span>
-                <label class="sr-only" for="composer-target" data-i18n="flow.composer.targetLabel">مخاطب</label>
-                <select id="composer-target" class="tt-select tt-select-compact" data-i18n-attr="aria-label:flow.composer.targetLabel"></select>
-              </div>
-              <div class="composer-input-row">
-                <textarea id="composer-input" class="tt-textarea" rows="2" placeholder="پیام یا نظر خود را برای تیم بنویسید…" data-i18n-attr="placeholder:flow.composer.placeholder"></textarea>
-                <button type="submit" id="composer-send" class="tt-btn tt-btn-primary" data-i18n="flow.composer.send">ارسال</button>
-              </div>
-            </form>
-
-            <!-- Read-Only Closure Receipt (Shown when isClosed === true) -->
-            <section id="closure-receipt" class="ledger-section closure-receipt hidden" aria-live="polite" data-tt-dynamic="true"></section>
-          </section>
-
-          <!-- VIEW 2: MAP & REPLAY -->
-          <section id="tab-map" class="tab-panel hidden" role="tabpanel" aria-labelledby="nav-tab-map">
-            <section class="ledger-section map-header-section">
-              <div class="section-head">
-                <h2 data-i18n="map.title">نقشه و بازپخش</h2>
-                <div id="map-subview-toggle" class="segmented-toggle" role="group" aria-label="نمای نقشه">
-                  <button type="button" class="seg-btn is-active" data-subview="sequence" aria-pressed="true" data-i18n="map.subview.sequence">توالی</button>
-                  <button type="button" class="seg-btn" data-subview="network" aria-pressed="false" data-i18n="map.subview.network">شبکه</button>
-                </div>
-              </div>
-
-              <div id="map-category-legend" class="map-category-legend" role="region" aria-label="راهنمای رنگ موضوعات" data-i18n-attr="aria-label:map.legend.ariaLabel">
-                <span class="legend-item" data-cat="referral">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-referral)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-referral)"></polygon></svg>
-                  <span data-i18n="map.legend.referral">ارجاع و واگذاری</span>
-                </span>
-                <span class="legend-item" data-cat="inquiry">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-inquiry)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-inquiry)"></polygon></svg>
-                  <span data-i18n="map.legend.inquiry">پرسش و بازخواست</span>
-                </span>
-                <span class="legend-item" data-cat="defect">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-defect)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-defect)"></polygon></svg>
-                  <span data-i18n="map.legend.defect">نقد و برگشت ایراد</span>
-                </span>
-                <span class="legend-item" data-cat="rewrite">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-rewrite)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-rewrite)"></polygon></svg>
-                  <span data-i18n="map.legend.rewrite">اصلاح و بازنویسی</span>
-                </span>
-                <span class="legend-item" data-cat="sync">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-sync)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-sync)"></polygon></svg>
-                  <span data-i18n="map.legend.sync">سینک همتا و پیام</span>
-                </span>
-                <span class="legend-item" data-cat="verify">
-                  <svg class="dir-arrow" viewBox="0 0 24 12" width="24" height="12" aria-hidden="true"><line x1="2" y1="6" x2="18" y2="6" stroke="var(--cat-verify)" stroke-width="2"></line><polygon points="17,2 23,6 17,10" fill="var(--cat-verify)"></polygon></svg>
-                  <span data-i18n="map.legend.verify">آزمون QA و تأیید</span>
-                </span>
-              </div>
-
-              <!-- Sequence Diagram Subview (Default) -->
-              <div id="sequence-diagram-wrap" class="sequence-diagram-wrap" data-tt-dynamic="true">
-                <div id="sequence-diagram-canvas" class="sequence-diagram-canvas"></div>
-                <table id="sequence-sr-table" class="sr-only">
-                  <caption data-i18n="map.sr.caption">جدول توالی رویدادهای پرونده</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col" data-i18n="map.sr.seq">شماره</th>
-                      <th scope="col" data-i18n="map.sr.from">از</th>
-                      <th scope="col" data-i18n="map.sr.to">به</th>
-                      <th scope="col" data-i18n="map.sr.action">اقدام</th>
-                      <th scope="col" data-i18n="map.sr.finding">یافته</th>
-                      <th scope="col" data-i18n="map.sr.status">وضعیت</th>
-                    </tr>
-                  </thead>
-                  <tbody id="sequence-sr-tbody"></tbody>
-                </table>
-              </div>
-
-              <!-- Network Graph Subview (3-row SVG + .comm-table under 480px) -->
-              <div id="network-graph-wrap" class="network-graph-wrap hidden">
-                <div class="graph-canvas-wrap">
-                  <svg id="swarm-interaction-svg" role="img" aria-label="نقشه تعامل تیم"></svg>
-                </div>
-                <div id="comm-table-wrap" class="comm-table-wrap" data-tt-dynamic="true"></div>
-              </div>
-            </section>
-
-            <!-- Sticky Replay Bar -->
-            <div class="replay-bar" role="region" aria-label="کنترل بازپخش">
-              <div class="replay-transport">
-                <button type="button" id="graph-step-prev" class="tt-icon-btn" data-i18n-attr="title:map.replay.prev,aria-label:map.replay.prev">
-                  <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M5 5v10M15 5l-7 5 7 5V5z"></path>
-                  </svg>
-                </button>
-                <button type="button" id="graph-replay-play" class="tt-btn tt-compact-btn" data-tt-dynamic="true">
-                  <svg viewBox="0 0 20 20" width="14" height="14" fill="currentColor" aria-hidden="true">
-                    <path d="M6 4.5l10 5.5-10 5.5V4.5z"></path>
-                  </svg>
-                  <span data-i18n="map.replay.play">پخش</span>
-                </button>
-                <button type="button" id="graph-step-next" class="tt-icon-btn" data-i18n-attr="title:map.replay.next,aria-label:map.replay.next">
-                  <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M15 5v10M5 5l7 5-7 5V5z"></path>
-                  </svg>
-                </button>
-              </div>
-
-              <div class="replay-scrubber-wrap">
-                <div id="replay-ticks" class="replay-ticks" aria-hidden="true"></div>
-                <input type="range" id="graph-replay-slider" class="replay-slider" min="0" max="0" value="0" aria-label="تایم‌لاین بازپخش" />
-              </div>
-
-              <div class="replay-meta-controls">
-                <select id="graph-replay-speed" class="tt-select tt-select-compact" data-i18n-attr="aria-label:map.replay.speed">
-                  <option value="1200">0.5x</option>
-                  <option value="700" selected>1x</option>
-                  <option value="350">2x</option>
-                </select>
-                <span id="graph-replay-seq" class="meta-note mono-id" dir="ltr" data-tt-dynamic="true">#0</span>
-                <button type="button" id="graph-replay-live" class="tt-btn tt-compact-btn is-live" data-tt-dynamic="true">زنده</button>
-              </div>
-              <p class="replay-shortcuts-hint" data-i18n="map.replay.shortcuts">Space پخش/توقف · چپ/راست گام · L زنده</p>
-            </div>
-          </section>
-
-          <!-- VIEW 3: TEAM -->
-          <section id="tab-team" class="tab-panel hidden" role="tabpanel" aria-labelledby="nav-tab-team">
-            <section class="ledger-section">
-              <div class="section-head">
-                <h2 data-i18n="team.title">اعضای تیم</h2>
-                <div class="tier-filters" role="group" aria-label="فیلتر لایه تیم">
-                  <button type="button" class="chip-btn is-active" data-tier="all" data-i18n="team.filter.all">همه</button>
-                  <button type="button" class="chip-btn" data-tier="supervisor" data-i18n="team.filter.supervisor">سرگروه‌ها</button>
-                  <button type="button" class="chip-btn" data-tier="tester" data-i18n="team.filter.tester">تستر QA</button>
-                  <button type="button" class="chip-btn" data-tier="worker" data-i18n="team.filter.worker">متخصصان</button>
-                </div>
-              </div>
-              <div id="team-list" class="team-list" data-tt-dynamic="true"></div>
-              <details id="inactive-team-drawer" class="ledger-drawer hidden">
-                <summary class="ledger-drawer-summary">
-                  <span data-i18n="team.inactiveDrawer">در این پرونده فعال نشدند</span>
-                  <span id="inactive-team-count" class="meta-note mono-id" data-tt-dynamic="true">0</span>
-                </summary>
-                <div id="inactive-team-list" class="team-list" data-tt-dynamic="true"></div>
-              </details>
-            </section>
-          </section>
-        </main>
-
-        <!-- Sticky Inspector (Desktop >=840) / Sheet (<840) -->
-        <aside id="case-inspector" class="case-inspector" aria-label="بازرس پرونده" data-i18n-attr="aria-label:inspector.title">
-          <div class="inspector-head">
-            <strong id="inspector-title" data-tt-dynamic="true" data-i18n="inspector.title">بازرس پرونده</strong>
-            <button type="button" id="btn-close-inspector" class="tt-icon-btn" title="بستن بازرس" aria-label="بستن بازرس" data-i18n-attr="title:inspector.close,aria-label:inspector.close">
-              <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M5 5l10 10M15 5L5 15"></path>
-              </svg>
-            </button>
-          </div>
-          <div id="case-inspector-body" class="inspector-body" data-tt-dynamic="true">
-            <p class="empty-note" data-i18n="inspector.emptyHint">روی یک یافته یا سطر رویداد کلیک کنید تا رشته کامل و مدرک در اینجا باز شود.</p>
-          </div>
-        </aside>
-      </div>
-    </div>
-
-    <!-- Settings Sheet (Bottom sheet <480/840, Side sheet >=840) -->
-    <div id="settings-sheet" class="settings-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="settings-sheet-title">
-    <div id="settings-backdrop" class="settings-backdrop"></div>
-    <div class="settings-panel">
-      <div class="settings-sheet-head">
-        <h2 id="settings-sheet-title" data-i18n="settings.title">تنظیمات پرونده</h2>
-        <button type="button" id="btn-close-settings" class="tt-icon-btn" title="بستن تنظیمات" aria-label="بستن تنظیمات" data-i18n-attr="title:settings.close,aria-label:settings.close">
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M5 5l10 10M15 5L5 15"></path>
-          </svg>
-        </button>
-      </div>
-
-      <div class="settings-sheet-body">
-        <section id="header-session-picker" class="settings-block header-picker-wrap hidden">
-          <h3 data-i18n="settings.switchCaseSection">تغییر پرونده</h3>
-          <div class="field-row">
-            <label for="conv-search-input" data-i18n="header.searchPlaceholder">جستجو در پرونده‌ها…</label>
-            <input id="conv-search-input" type="search" class="tt-input tt-input-compact" placeholder="جستجو در پرونده‌ها…" data-i18n-attr="placeholder:header.searchPlaceholder" />
-          </div>
-          <div class="field-row">
-            <label for="conv-switcher" data-i18n="header.switchSession">انتخاب پرونده</label>
-            <select id="conv-switcher" class="tt-select tt-select-compact" title="انتخاب پرونده" data-i18n-attr="title:header.switchSession"></select>
-          </div>
-        </section>
-
-        <section class="settings-block">
-          <h3 data-i18n="settings.sessionSection">پروژه و دستور کار</h3>
-          <form id="session-form" class="settings-form">
-            <div class="field-row">
-              <label for="input-project" data-i18n="settings.projectLabel">نام پروژه</label>
-              <input id="input-project" type="text" class="tt-input" placeholder="نام پروژه یا ماژول" data-i18n-attr="placeholder:settings.projectPlaceholder" />
-            </div>
-            <div class="field-row">
-              <label for="input-directive" data-i18n="settings.directiveLabel">دستور کار</label>
-              <textarea id="input-directive" class="tt-textarea" rows="2" placeholder="هدف و دامنه این پرونده" data-i18n-attr="placeholder:settings.directivePlaceholder"></textarea>
-            </div>
-            <div class="settings-actions">
-              <button type="submit" class="tt-btn tt-btn-primary" data-i18n="settings.saveSession">ذخیره پرونده</button>
-              <button type="button" id="btn-extend-rounds" class="tt-btn" data-i18n="settings.extendRounds">+۳ دور</button>
-              <button type="button" id="btn-reconnect" class="tt-btn" data-i18n="settings.reconnect">اتصال مجدد</button>
-            </div>
-            <p id="session-save-feedback" class="inline-feedback hidden" role="status" aria-live="polite" data-tt-dynamic="true"></p>
-          </form>
-
-          <div class="closure-action-wrap">
-            <div id="force-close-wrap" class="field-row hidden">
-              <label for="input-force-reason" data-i18n="settings.forceCloseLabel">بستن اجباری با دلیل (وقتی یافته باز باقی مانده):</label>
-              <input id="input-force-reason" type="text" class="tt-input" placeholder="دلیل بستن با یافته باز…" data-i18n-attr="placeholder:settings.forceClosePlaceholder" />
-            </div>
-            <button type="button" id="btn-Complete-Case" class="tt-btn tt-btn-verified" data-i18n="settings.completeCaseBtn">تأیید نهایی و بستن پرونده</button>
-          </div>
-        </section>
-
-        <section class="settings-block">
-          <h3 data-i18n="settings.capsSection">سقف دور نقش‌ها</h3>
-          <form id="caps-form" class="settings-form">
-            <div class="cap-row">
-              <div class="field-row">
-                <label for="cap-main" data-i18n="settings.capMain">عامل اصلی</label>
-                <input id="cap-main" type="number" class="tt-input" min="1" max="500" value="50" />
-              </div>
-              <div class="cap-usage-meta">
-                <span id="cap-main-usage" class="meta-note mono-id" data-tt-dynamic="true">0 / 50</span>
-                <div class="cap-meter" aria-hidden="true"><div id="cap-main-bar" class="cap-meter-fill"></div></div>
-              </div>
-            </div>
-            <div class="cap-row">
-              <div class="field-row">
-                <label for="cap-manager" data-i18n="settings.capManager">مدیر تیم</label>
-                <input id="cap-manager" type="number" class="tt-input" min="1" max="500" value="50" />
-              </div>
-              <div class="cap-usage-meta">
-                <span id="cap-manager-usage" class="meta-note mono-id" data-tt-dynamic="true">0 / 50</span>
-                <div class="cap-meter" aria-hidden="true"><div id="cap-manager-bar" class="cap-meter-fill"></div></div>
-              </div>
-            </div>
-            <div class="cap-row">
-              <div class="field-row">
-                <label for="cap-subagents" data-i18n="settings.capSubagents">زیرعامل‌ها</label>
-                <input id="cap-subagents" type="number" class="tt-input" min="1" max="500" value="50" />
-              </div>
-              <div class="cap-usage-meta">
-                <span id="cap-subagents-usage" class="meta-note mono-id" data-tt-dynamic="true">0 / 50</span>
-                <div class="cap-meter" aria-hidden="true"><div id="cap-subagents-bar" class="cap-meter-fill"></div></div>
-              </div>
-            </div>
-            <div class="settings-actions">
-              <button type="submit" id="btn-save-caps" class="tt-btn tt-btn-primary" data-i18n="settings.saveCaps">ذخیره سقف‌ها</button>
-              <span id="caps-save-feedback" class="inline-feedback hidden" role="status" aria-live="polite" data-tt-dynamic="true"></span>
-            </div>
-          </form>
-        </section>
-
-        <section class="settings-block">
-          <h3 data-i18n="settings.prefsSection">نمایش و زبان</h3>
-          <div class="prefs-row">
-            <button type="button" id="language-toggle" class="tt-btn">
-              <span data-i18n="settings.languageLabel">زبان رابط</span>
-              <strong id="language-toggle-label">EN</strong>
-            </button>
-            <button type="button" id="theme-toggle" class="tt-btn" aria-pressed="true">
-              <span id="theme-icon-slot" class="tt-inline-svg" aria-hidden="true"></span>
-              <span data-i18n="settings.themeLabel">پوسته</span>
-            </button>
-          </div>
-          <label class="dev-mode-row" for="dev-mode-toggle">
-            <input type="checkbox" id="dev-mode-toggle" />
-            <span>
-              <strong data-i18n="settings.devModeLabel">حالت توسعه‌دهنده</strong>
-              <span class="meta-note" data-i18n="settings.devModeHint">نمایش شناسه نشست، منبع دقیق و بازرس JSON خام</span>
-            </span>
+        <form class="inline-create-form" id="empty-create-form" hidden>
+          <label class="field-group" for="empty-project-input">
+            <span class="field-label" id="empty-project-label">عنوان پروژه</span>
+            <input type="text" class="field-input" id="empty-project-input" name="project" required maxlength="120">
           </label>
-        </section>
-
-        <details id="raw-inspector-drawer" class="ledger-drawer hidden">
-          <summary class="ledger-drawer-summary">
-            <span data-i18n="settings.rawTitle">داده‌های خام پرونده (JSON)</span>
-            <span class="mono-id">JSON</span>
-          </summary>
-          <div class="raw-panel">
-            <div class="raw-toolbar">
-              <select id="raw-kind-select" class="tt-select tt-select-compact">
-                <option value="findings">findings</option>
-                <option value="messages">messages (#seq)</option>
-                <option value="interactions">interactions</option>
-                <option value="subtasks">subtasks (WBS)</option>
-                <option value="fileLocks">fileLocks</option>
-                <option value="agents">agents</option>
-                <option value="roles">roles</option>
-                <option value="full">full snapshot</option>
-              </select>
-              <button type="button" id="raw-copy-btn" class="tt-btn tt-compact-btn" data-i18n="settings.rawCopy">کپی JSON</button>
-            </div>
-            <pre id="raw-json-viewer" class="raw-json-pre mono-code"></pre>
+          <label class="field-group" for="empty-directive-input">
+            <span class="field-label" id="empty-directive-label">شرح ماموریت</span>
+            <input type="text" class="field-input" id="empty-directive-input" name="directive" maxlength="400">
+          </label>
+          <div class="form-row-actions">
+            <button type="submit" class="btn btn-primary" id="btn-empty-submit">ثبت و شروع</button>
+            <button type="button" class="btn btn-quiet" id="btn-empty-cancel">انصراف</button>
           </div>
-        </details>
+        </form>
+        <div class="recent-cases-wrap" id="empty-recent-wrap" hidden>
+          <h3 class="sub-heading" id="empty-recent-heading">پرونده‌های اخیر</h3>
+          <div class="recent-cases-list" id="empty-recent-list"></div>
+        </div>
       </div>
     </div>
+
+    <main class="studio-workspace" id="studio-workspace" hidden>
+      <div class="boards-stage" id="boards-stage">
+        <div id="panel-command" class="board-pane" role="tabpanel" aria-labelledby="tab-command"></div>
+        <div id="panel-topology" class="board-pane" role="tabpanel" aria-labelledby="tab-topology" hidden></div>
+        <div id="panel-chronicle" class="board-pane" role="tabpanel" aria-labelledby="tab-chronicle" hidden></div>
+        <div id="panel-squad" class="board-pane" role="tabpanel" aria-labelledby="tab-squad" hidden></div>
+      </div>
+      <aside class="dossier-drawer" id="dossier-drawer" aria-label="بازرس جزئیات پرونده" hidden></aside>
+    </main>
+
+    <div class="modal-backdrop" id="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+      <div class="modal-dialog surface-plate" id="settings-dialog"></div>
     </div>
   </div>
 
-  <script src="/i18n.js"></script>
-  <script src="/activity.js"></script>
-  <script src="/app.js"></script>
+  <script>
+    (async function () {
+      async function loadViaBlobModules() {
+        var order = [
+          '/src/roles.mjs',
+          '/src/i18n.mjs',
+          '/src/dom.mjs',
+          '/src/sync.mjs',
+          '/src/store.mjs',
+          '/src/inspector.mjs',
+          '/src/boards/command-board.mjs',
+          '/src/boards/topology-board.mjs',
+          '/src/boards/chronicle-board.mjs',
+          '/src/boards/squad-board.mjs',
+          '/src/app.mjs',
+        ];
+        var texts = await Promise.all(order.map(async function (path) {
+          var res = await fetch(path);
+          if (!res.ok) throw new Error('HTTP ' + res.status + ' loading ' + path);
+          return res.text();
+        }));
+        var blobs = Object.create(null);
+        for (var i = 0; i < order.length; i += 1) {
+          var modPath = order[i];
+          var rewritten = texts[i].replace(/(from\s*)(['"])(\.\.?\/[^'"]+)\2/g, function (_, kw, q, spec) {
+            var resolved = new URL(spec, 'http://local' + modPath).pathname;
+            var target = blobs[resolved] || resolved;
+            return kw + q + target + q;
+          });
+          blobs[modPath] = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }));
+        }
+        await import(blobs['/src/app.mjs']);
+      }
+
+      try {
+        if (window.location && window.location.protocol === 'plugin:') {
+          await loadViaBlobModules();
+        } else {
+          try {
+            await import('/src/app.mjs');
+          } catch (_) {
+            await loadViaBlobModules();
+          }
+        }
+      } catch (err) {
+        console.error('[think-tank] failed to boot UI:', err);
+        var loading = document.getElementById('state-loading');
+        var banner = document.getElementById('offline-banner');
+        var text = document.getElementById('offline-banner-text');
+        if (loading) loading.hidden = true;
+        if (banner) banner.hidden = false;
+        if (text) text.textContent = String(err && err.message ? err.message : err);
+      }
+    })();
+  </script>
 </body>
 </html>

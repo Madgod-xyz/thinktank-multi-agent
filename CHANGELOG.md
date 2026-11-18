@@ -2,6 +2,29 @@
 
 All notable changes to `team-orchestration-director` (ThinkTank) are documented in this file.
 
+## [4.0.0]
+
+### Added
+- **Modular Backend Architecture (`backend/`):**
+  - Split monolithic server into focused modules: `catalog.py` (canonical 7+1 roles, aliases, URI normalizer), `governance.py` (caps, round limits, 95% review gate), `store.py` (SQLite WAL single source of truth + `workspace_sessions` + `subagent_links` + `prune_bloat`), `session_resolver.py` (Brain transcript parent discovery + hysteretic workspace binding), `ws_hub.py` (single-commit `CASE_EVENT` + `TRANSIENT_PULSE` hub), `ledger_domain.py` (pure state machine), and `app.py` (clean FastAPI surface).
+  - Added `schemaVersion: "4.0"` and `updatedAtMs` / `createdAtMs` epoch timestamps across snapshots, findings, subtasks, messages, interactions, and closure receipts (`AUD-08`).
+- **New CLI Diagnostics & Installer Controls (`tools/`):**
+  - Added `status`, `doctor`, and `prune-db` subcommands to `tools/thinktank_bridge.py`.
+  - Added `--stop-backend`, `--no-hook`, legacy v3 file pruning (`app.js`, `i18n.js`, `activity.js`, `conversation-context.mjs`, `ui-preferences.mjs`, `*.cjs`), and orphaned `active_antigravity_session*.tmp` cleanup to `tools/install_plugin.py`.
+  - Updated `tools/verify_release.py` to enforce `4.0.0` manifest parity, `role_catalog.json` and `bridge_transport.py` byte parity, backend `unittest`, and ESM `node --test` checks.
+- **Hallmark v2.0 4-Board Studio Sidecar (`sidecars/think-tank/`):**
+  - Modular Native ESM architecture (`src/app.mjs`, `src/store.mjs`, `src/sync.mjs`, `src/dom.mjs`, `src/i18n.mjs`, `src/roles.mjs`, `src/inspector.mjs`, `src/boards/`).
+  - 3-tier port-slotted SVG Topology & Flow board, sticky Swimlane Sequence Matrix, auto-collapsing Contextual Dossier Drawer, and Hallmark `tokens.css` / `app.css`.
+
+### Fixed
+- **AUD-01 (Single-Commit Broadcast):** Eliminated triple-broadcast storms (`NEW_MESSAGE` + `COLLABORATION_UPDATE` + `AGENTS_UPDATE`); each mutation commits once and emits a single `CASE_EVENT` with `changedSlices`.
+- **AUD-02 / AUD-10 (Slice Revisions & Keyed Patching):** Replaced destructive full-board `innerHTML` rebuilds with slice-level revisions and keyed in-place DOM/SVG patching.
+- **AUD-03 (Eliminated `SYNC_READY` Race):** WebSocket connect now emits strictly `SYNC_REPLAY` or `SYNC_SNAPSHOT`.
+- **AUD-04 (SQLite WAL Single Source of Truth):** Removed runtime writes and `deepcopy` dumps to `think_tank_live_state.json`; retained read-only startup migration via `SyncEventStore.import_legacy_files`.
+- **AUD-05 (Windows Atomic Write Cleanup):** Replaced leaky temp writes in `tools/thinktank_antigravity_hook.py` with `write_json_atomic` (3x `PermissionError` retry + `finally` unlink).
+- **AUD-06 (Complete Interaction Graph):** Guaranteed `interactions[]` edges for proposal votes (`VOTE` / `DECISION`), channel messages without `@mention`, and `invoke_subagent` / `send_message` hook delegations.
+- **AUD-07 / AUD-12 / AUD-14 (Parity & Dead Code Removal):** Unified role aliases (`coordinator -> main_agent`) across backend, hook, and UI; removed dead v3 `.js`/`.cjs` files; standardized 100% ESM tests.
+
 ## [3.0.0]
 
 ### Added

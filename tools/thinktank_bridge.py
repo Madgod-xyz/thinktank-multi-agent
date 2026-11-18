@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-ThinkTank v2.0 — Live Swarm-Style Bridge CLI
+ThinkTank v4.0 — Live Case Ledger Bridge CLI
 Streams tasks, WBS subtasks, supervisor interrogations, code-reviewer -> qa-reviewer
-testing dispatches/reports, worker peer-to-peer syncs, proposals, and tool telemetry.
+testing dispatches/reports, worker peer-to-peer syncs, proposals, telemetry, and DB diagnostics.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 TOOLS_DIR = str(Path(__file__).resolve().parent)
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
+import bridge_transport  # noqa: E402
 from bridge_transport import api_get, api_post  # noqa: E402
 
 if sys.platform == "win32":
@@ -26,12 +31,12 @@ if sys.platform == "win32":
         pass
 
 
-def report_result(label: str, result: dict):
+def report_result(label: str, result: dict) -> dict:
     status = result.get("status")
     if status == "queued_offline":
         print(f"[ThinkTank] Queued while backend is offline: {label} (event {result.get('eventId')})")
     elif status in {"error", "offline"} or result.get("success") is False:
-        print(f"[ThinkTank] Not confirmed: {label} — {result.get('error', status)}")
+        print(f"[ThinkTank] Not confirmed: {label} - {result.get('error', status)}")
     elif status == "duplicate":
         print(f"[ThinkTank] Duplicate retry ignored: {label}")
     else:
@@ -80,40 +85,35 @@ def set_triage(chosen: str, tt_reasons: list = None, solo_reasons: list = None, 
             "timestamp": time.strftime("%H:%M:%S"),
         }
     }
-    res = api_post("task/update", payload, conv_id)
-    return report_result(f"Triage recorded: {chosen}", res)
+    return report_result(f"Triage recorded: {chosen}", api_post("task/update", payload, conv_id))
 
 
-def set_task(project: str, directive: str, phase: str = "Active Deliberation", progress: int = 50, round: int = None, max_rounds: int = None, conv_id: str = None, new_run: bool = False):
-    payload = {
-        "project": project,
-        "directive": directive,
-        "status": "ACTIVE",
-        "phase": phase,
-        "progress": progress,
-    }
+def set_task(
+    project: str,
+    directive: str,
+    phase: str = "Active Deliberation",
+    progress: int = 50,
+    round: int = None,
+    max_rounds: int = None,
+    conv_id: str = None,
+    new_run: bool = False,
+):
+    payload = {"project": project, "directive": directive, "status": "ACTIVE", "phase": phase, "progress": progress}
     if new_run:
         payload["newRun"] = True
     if round is not None:
         payload["round"] = round
     if max_rounds is not None:
         payload["maxRounds"] = max_rounds
-    res = api_post("task/update", payload, conv_id)
-    return report_result(f"Task updated: [{project}] {directive}", res)
+    return report_result(f"Task updated: [{project}] {directive}", api_post("task/update", payload, conv_id))
 
 
 def set_proposal(proposal_id: str, project: str, title: str, author: str, summary: str, options: list = None, votes: list = None, conv_id: str = None):
     payload = {
-        "id": proposal_id,
-        "project": project,
-        "title": title,
-        "author": author,
-        "summary": summary,
-        "decisionOptions": options or [],
-        "votes": votes or [],
+        "id": proposal_id, "project": project, "title": title, "author": author,
+        "summary": summary, "decisionOptions": options or [], "votes": votes or [],
     }
-    res = api_post("proposal/update", payload, conv_id)
-    return report_result(f"Proposal submitted: «{title}»", res)
+    return report_result(f"Proposal submitted: «{title}»", api_post("proposal/update", payload, conv_id))
 
 
 def post_message(
@@ -158,30 +158,16 @@ def post_message(
     }
     if is_review:
         payload["reviewId"] = review_id
-    if recipient_code:
-        payload["recipientCode"] = recipient_code
-    if recipient_name:
-        payload["recipientName"] = recipient_name
-    if recipient_role:
-        payload["recipientRole"] = recipient_role
-    if recipient:
-        payload["recipient"] = recipient
-    if thoughts:
-        payload["thoughts"] = thoughts
-    if critique:
-        payload["critique"] = critique
-    if question:
-        payload["question"] = question
-    if report:
-        payload["report"] = report
-    if action_type:
-        payload["actionType"] = action_type
-    if request_type:
-        payload["requestType"] = request_type
-    if severity:
-        payload["severity"] = severity
-    res = api_post("chat/send", payload, conv_id)
-    return report_result(f"Message posted ({payload['channel']}) by {sender_name}", res)
+    for key, val in (
+        ("recipientCode", recipient_code), ("recipientName", recipient_name),
+        ("recipientRole", recipient_role), ("recipient", recipient),
+        ("thoughts", thoughts), ("critique", critique),
+        ("question", question), ("report", report),
+        ("actionType", action_type), ("requestType", request_type), ("severity", severity),
+    ):
+        if val:
+            payload[key] = val
+    return report_result(f"Message posted ({payload['channel']}) by {sender_name}", api_post("chat/send", payload, conv_id))
 
 
 def update_agent(
@@ -201,31 +187,18 @@ def update_agent(
     progress: int = None,
 ):
     clean_id = agent_id.replace("agent-", "").lower()
-    payload = {"id": clean_id}
-    if task:
-        payload["task"] = task
-    if tool:
-        payload["tool"] = tool
-    if thought:
-        payload["thought"] = thought
-    if demo:
-        payload["demo"] = demo
-    if status:
-        payload["status"] = status
+    payload: dict = {"id": clean_id}
+    for key, val in (
+        ("task", task), ("tool", tool), ("thought", thought), ("demo", demo),
+        ("status", status), ("name", name), ("role", role), ("code", code), ("icon", icon),
+    ):
+        if val:
+            payload[key] = val
     if latency is not None:
         payload["latency"] = latency
-    if name:
-        payload["name"] = name
-    if role:
-        payload["role"] = role
-    if code:
-        payload["code"] = code
-    if icon:
-        payload["icon"] = icon
     if progress is not None:
         payload["progress"] = progress
-    res = api_post("agent/update", payload, conv_id)
-    return report_result(f"Agent [{clean_id}] updated", res)
+    return report_result(f"Agent [{clean_id}] updated", api_post("agent/update", payload, conv_id))
 
 
 def collaborate(
@@ -244,6 +217,7 @@ def collaborate(
     question: str = None,
     report: str = None,
     result: str = None,
+    return_to_fixing: bool = False,
     origin: str = None,
     subagent_conv_id: str = None,
     finding_id: str = None,
@@ -272,7 +246,7 @@ def collaborate(
         "APPROVE": "COUNCIL",
     }.get(action_upper, "SYNC")).upper()
 
-    payload = {
+    payload: dict = {
         "fromAgent": from_clean,
         "toAgent": to_clean,
         "action": action_upper,
@@ -288,6 +262,8 @@ def collaborate(
         "result": result.upper() if result else None,
         **_resolve_origin_fields(origin, subagent_conv_id),
     }
+    if return_to_fixing:
+        payload["returnToFixing"] = True
     if finding_id:
         payload["findingId"] = finding_id
     if work_item_id:
@@ -304,31 +280,20 @@ def collaborate(
         payload["runner"] = runner
     if runner_reason:
         payload["runnerReason"] = runner_reason
-    res = api_post("agent/collaborate", payload, conv_id)
-    return report_result(f"[{action_upper}] {from_clean} -> {to_clean} ({label})", res)
+    return report_result(f"[{action_upper}] {from_clean} -> {to_clean} ({label})", api_post("agent/collaborate", payload, conv_id))
 
 
 def return_defect(from_agent: str, to_agent: str, bug: str, severity: str = "HIGH", critique: str = None, conv_id: str = None, *, finding_id: str = None, work_item_id: str = None, repro_steps: str = None, request_type: str = None, origin: str = None, subagent_conv_id: str = None):
     sev = (severity or "HIGH").upper()
     fid_tag = f" ({finding_id})" if finding_id else ""
-    msg = f"[ایراد برگشتی برای اصلاح{fid_tag} · {sev}] @{to_agent}\n{bug}"
+    msg = f"[ایراد برگشتی برای اصلاح{fid_tag} | {sev}] @{to_agent}\n{bug}"
     return collaborate(
-        from_agent=from_agent or "council-critic",
-        to_agent=to_agent,
-        label=f"ایراد برگشتی ({sev})",
-        message=msg,
-        action="RETURN_DEFECT",
-        request_type=request_type,
-        channel="INTERROGATION",
-        severity=sev,
-        question=bug,
-        critique=critique or bug,
-        finding_id=finding_id,
-        work_item_id=work_item_id,
-        repro_steps=repro_steps,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent or "council-critic", to_agent=to_agent,
+        label=f"ایراد برگشتی ({sev})", message=msg, action="RETURN_DEFECT",
+        request_type=request_type, channel="INTERROGATION", severity=sev,
+        question=bug, critique=critique or bug, finding_id=finding_id,
+        work_item_id=work_item_id, repro_steps=repro_steps,
+        origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
@@ -337,78 +302,42 @@ def worker_fix(from_agent: str, to_agent: str, fix: str, files: str = None, conv
     fid_tag = f" ({finding_id})" if finding_id else ""
     msg = f"[اصلاحیه تکمیل و ارسال شد{fid_tag}] @{to_agent or 'code-reviewer'}\n{fix}{file_line}"
     return collaborate(
-        from_agent=from_agent,
-        to_agent=to_agent or "code-reviewer",
-        label="تحویل اصلاحیه کارگر",
-        message=msg,
-        action="WORKER_FIX",
-        request_type=request_type,
-        channel="QA",
-        thoughts=fix,
-        report=files or fix,
-        finding_id=finding_id,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent, to_agent=to_agent or "code-reviewer",
+        label="تحویل اصلاحیه کارگر", message=msg, action="WORKER_FIX",
+        request_type=request_type, channel="QA", thoughts=fix, report=files or fix,
+        finding_id=finding_id, origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
-def review_query(from_agent: str, to_agent: str, question: str, conv_id: str = None, *, finding_id: str = None, result: str = None, severity: str = None, request_type: str = None, origin: str = None, subagent_conv_id: str = None):
+def review_query(from_agent: str, to_agent: str, question: str, conv_id: str = None, *, finding_id: str = None, result: str = None, severity: str = None, return_to_fixing: bool = False, request_type: str = None, origin: str = None, subagent_conv_id: str = None):
     fid_tag = f" ({finding_id})" if finding_id else ""
     msg = f"[پرسش بررسی و رفع ابهام{fid_tag}] @{to_agent}\n{question}"
     return collaborate(
-        from_agent=from_agent or "code-reviewer",
-        to_agent=to_agent,
-        label="پرسش بررسی و QA",
-        message=msg,
-        action="REVIEW_QUERY",
-        request_type=request_type,
-        channel="QA",
-        severity=severity,
-        question=question,
-        thoughts=question,
-        result=result,
-        finding_id=finding_id,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent or "code-reviewer", to_agent=to_agent,
+        label="پرسش بررسی و QA", message=msg, action="REVIEW_QUERY",
+        request_type=request_type, channel="QA", severity=severity,
+        question=question, thoughts=question, result=result, return_to_fixing=return_to_fixing,
+        finding_id=finding_id, origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
 def interrogate(from_agent: str, to_agent: str, question: str, severity: str = "HIGH", critique: str = None, conv_id: str = None, *, request_type: str = None, origin: str = None, subagent_conv_id: str = None):
-    msg = f"[بازخواست سرگروه · {severity.upper()}] @{to_agent}\n{question}"
+    msg = f"[بازخواست سرگروه | {severity.upper()}] @{to_agent}\n{question}"
     return collaborate(
-        from_agent=from_agent,
-        to_agent=to_agent,
-        label=f"بازخواست سرگروه ({severity.upper()})",
-        message=msg,
-        action="INTERROGATE",
-        request_type=request_type,
-        channel="INTERROGATION",
-        severity=severity.upper(),
-        question=question,
-        critique=critique or question,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent, to_agent=to_agent,
+        label=f"بازخواست سرگروه ({severity.upper()})", message=msg, action="INTERROGATE",
+        request_type=request_type, channel="INTERROGATION", severity=severity.upper(),
+        question=question, critique=critique or question,
+        origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
 def peer_sync(from_agent: str, to_agent: str, topic: str, summary: str, question: str = None, conv_id: str = None, *, request_type: str = None, origin: str = None, subagent_conv_id: str = None):
-    msg = f"[سینک همتا · {topic}] @{to_agent}\n{summary}"
+    msg = f"[سینک همتا | {topic}] @{to_agent}\n{summary}"
     return collaborate(
-        from_agent=from_agent,
-        to_agent=to_agent,
-        label=topic,
-        message=msg,
-        action="PEER_SYNC",
-        request_type=request_type,
-        channel="SYNC",
-        question=question,
-        thoughts=summary,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent, to_agent=to_agent, label=topic, message=msg,
+        action="PEER_SYNC", request_type=request_type, channel="SYNC",
+        question=question, thoughts=summary, origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
@@ -416,18 +345,10 @@ def qa_dispatch(from_agent: str, to_agent: str, scope: str, checks: str, conv_id
     fid_tag = f" ({finding_id})" if finding_id else ""
     msg = f"[دستور اجرای تست از کد ریویور{fid_tag}] @{to_agent}\nدامنه: {scope}\nچک‌لیست آزمون: {checks}"
     return collaborate(
-        from_agent=from_agent or "code-reviewer",
-        to_agent=to_agent or "qa-reviewer",
-        label=f"دستور تست: {scope[:48]}",
-        message=msg,
-        action="QA_DISPATCH",
-        request_type=request_type,
-        channel="QA",
-        thoughts=checks,
-        finding_id=finding_id,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent=from_agent or "code-reviewer", to_agent=to_agent or "qa-reviewer",
+        label=f"دستور تست: {scope[:48]}", message=msg, action="QA_DISPATCH",
+        request_type=request_type, channel="QA", thoughts=checks,
+        finding_id=finding_id, origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
@@ -435,28 +356,16 @@ def qa_report(status: str, summary: str, details: str = None, to_agent: str = "c
     status_upper = status.upper().strip()
     badge = "PASS" if status_upper == "PASS" else "FAIL"
     fid_tag = f" ({finding_id})" if finding_id else ""
-    msg = f"[گزارش تستر QA{fid_tag} · {badge}] @{to_agent}\n{summary}"
+    msg = f"[گزارش تستر QA{fid_tag} | {badge}] @{to_agent}\n{summary}"
     return collaborate(
-        from_agent="qa-reviewer",
-        to_agent=to_agent or "code-reviewer",
-        label=f"نتیجه تست: {badge}",
-        message=msg,
-        action="QA_REPORT",
-        request_type=request_type,
-        channel="QA",
-        critique=details if status_upper != "PASS" else None,
-        report=details or summary,
-        severity="LOW" if status_upper == "PASS" else "CRITICAL",
-        result=status_upper,
-        finding_id=finding_id,
-        evidence_command=evidence_command,
-        exit_code=exit_code,
-        evidence_excerpt=evidence_excerpt,
-        runner=runner,
-        runner_reason=runner_reason,
-        origin=origin,
-        subagent_conv_id=subagent_conv_id,
-        conv_id=conv_id,
+        from_agent="qa-reviewer", to_agent=to_agent or "code-reviewer",
+        label=f"نتیجه تست: {badge}", message=msg, action="QA_REPORT",
+        request_type=request_type, channel="QA",
+        critique=details if status_upper != "PASS" else None, report=details or summary,
+        severity="LOW" if status_upper == "PASS" else "CRITICAL", result=status_upper,
+        finding_id=finding_id, evidence_command=evidence_command, exit_code=exit_code,
+        evidence_excerpt=evidence_excerpt, runner=runner, runner_reason=runner_reason,
+        origin=origin, subagent_conv_id=subagent_conv_id, conv_id=conv_id,
     )
 
 
@@ -468,54 +377,39 @@ def log_tool(agent_id: str, tool: str, status: str = "SUCCESS", args_json: str =
         except Exception:
             parsed_args = {"raw": args_json}
     payload = {
-        "agentId": agent_id,
-        "agentName": agent_name or agent_id,
-        "tool": tool,
-        "args": parsed_args,
-        "output": output,
-        "status": status,
-        "latencyMs": latency_ms,
+        "agentId": agent_id, "agentName": agent_name or agent_id, "tool": tool,
+        "args": parsed_args, "output": output, "status": status, "latencyMs": latency_ms,
     }
-    res = api_post("telemetry/tool_call", payload, conv_id)
-    return report_result(f"Tool call logged: {agent_id} -> {tool} ({status})", res)
+    return report_result(f"Tool call logged: {agent_id} -> {tool} ({status})", api_post("telemetry/tool_call", payload, conv_id))
 
 
 def set_round(round_num: int, max_rounds: int = None, conv_id: str = None):
     payload = {"round": round_num}
     if max_rounds is not None:
         payload["maxRounds"] = max_rounds
-    res = api_post("task/update", payload, conv_id)
     label = f"Round updated: {round_num}" + (f"/{max_rounds}" if max_rounds is not None else "")
-    return report_result(label, res)
+    return report_result(label, api_post("task/update", payload, conv_id))
 
 
 def set_role_caps(main: int = 50, manager: int = 50, subagents: int = 50, conv_id: str = None):
-    res = api_post("task/update", {"roleCaps": {"main": main, "manager": manager, "subagents": subagents}}, conv_id)
-    return report_result("Role conversation caps updated", res)
+    return report_result("Role conversation caps updated", api_post("task/update", {"roleCaps": {"main": main, "manager": manager, "subagents": subagents}}, conv_id))
 
 
 def submit_review(review_id: str, manager_summary: str, main_summary: str, confidence: int, recommendation: str, continue_reasons: list, completion_reasons: list, evidence: list, conv_id: str = None):
     payload = {
-        "reviewId": review_id,
-        "managerSummary": manager_summary,
-        "mainSummary": main_summary,
-        "confidence": confidence,
-        "recommendation": recommendation,
-        "continueReasons": continue_reasons,
-        "completionReasons": completion_reasons,
-        "evidence": evidence,
+        "reviewId": review_id, "managerSummary": manager_summary, "mainSummary": main_summary,
+        "confidence": confidence, "recommendation": recommendation,
+        "continueReasons": continue_reasons, "completionReasons": completion_reasons, "evidence": evidence,
     }
     return report_result("Evidence-backed manager review submitted", api_post("governance/submit_review", payload, conv_id))
 
 
 def request_round_extension(additional_rounds: int = 3, conv_id: str = None):
-    res = api_post("governance/extend_rounds", {"additionalRounds": additional_rounds}, conv_id)
-    return report_result(f"Round extension (+{additional_rounds}) submitted", res)
+    return report_result(f"Round extension (+{additional_rounds}) submitted", api_post("governance/extend_rounds", {"additionalRounds": additional_rounds}, conv_id))
 
 
 def compress_final_round(conv_id: str = None):
-    res = api_post("governance/compress_final", {}, conv_id)
-    return report_result("Final-round review requested", res)
+    return report_result("Final-round review requested", api_post("governance/compress_final", {}, conv_id))
 
 
 def wait_user_action(timeout_seconds: int = 300, poll_interval: float = 2.0, conv_id: str = None):
@@ -545,17 +439,14 @@ def wait_user_action(timeout_seconds: int = 300, poll_interval: float = 2.0, con
 
 def complete_task(summary: str = "تمامی تسک‌ها، اصلاحیه‌ها و تست‌های QA تکمیل و نشست بسته شد.", conv_id: str = None, *, force: bool = False, reason: str = None, origin: str = None, subagent_conv_id: str = None):
     payload = {
-        "status": "COMPLETED",
-        "progress": 100,
+        "status": "COMPLETED", "progress": 100,
         "phase": "تکمیل‌شده و بسته — پس از بازبینی و تایید QA",
-        "forceClose": bool(force),
-        "summary": summary,
+        "forceClose": bool(force), "summary": summary,
         **_resolve_origin_fields(origin, subagent_conv_id),
     }
     if reason is not None:
         payload["forceReason"] = reason
-    update = api_post("task/update", payload, conv_id)
-    return report_result("Completion state submitted", update)
+    return report_result("Completion state submitted", api_post("task/update", payload, conv_id))
 
 
 def assign_subtask(
@@ -579,17 +470,9 @@ def assign_subtask(
     subagent_conv_id: str = None,
 ):
     payload = {
-        "id": subtask_id,
-        "title": title,
-        "assignee": assignee,
-        "assigneeName": assignee_name,
-        "delegatedBy": delegated_by,
-        "delegatedByName": delegated_by_name,
-        "status": status,
-        "priority": priority,
-        "deliverable": deliverable or "",
-        "thoughts": thoughts,
-        "report": report,
+        "id": subtask_id, "title": title, "assignee": assignee, "assigneeName": assignee_name,
+        "delegatedBy": delegated_by, "delegatedByName": delegated_by_name, "status": status,
+        "priority": priority, "deliverable": deliverable or "", "thoughts": thoughts, "report": report,
         "dependencies": dependencies or [],
         **_resolve_origin_fields(origin, subagent_conv_id),
     }
@@ -598,19 +481,14 @@ def assign_subtask(
     if acceptance_criteria is not None:
         payload["acceptanceCriteria"] = acceptance_criteria
     res = api_post("subtasks/upsert", payload, conv_id)
-    report_result(f"Subtask [{title}] -> {assignee} ({status})", res)
-    return res
+    return report_result(f"Subtask [{title}] -> {assignee} ({status})", res)
 
 
 def finding_action(finding_id: str, action: str, reason: str = None, conv_id: str = None):
-    payload = {
-        "findingId": finding_id,
-        "action": action,
-    }
+    payload = {"findingId": finding_id, "action": action}
     if reason is not None:
         payload["reason"] = reason
-    res = api_post("findings/action", payload, conv_id)
-    return report_result(f"Finding {finding_id} action [{action}]", res)
+    return report_result(f"Finding {finding_id} action [{action}]", api_post("findings/action", payload, conv_id))
 
 
 def vote_proposal(
@@ -627,18 +505,12 @@ def vote_proposal(
     subagent_conv_id: str = None,
 ):
     payload = {
-        "voter": voter,
-        "voterName": voter_name,
-        "voterRole": voter_role,
-        "stance": stance,
-        "confidence": confidence,
-        "comment": comment,
+        "voter": voter, "voterName": voter_name, "voterRole": voter_role,
+        "stance": stance, "confidence": confidence, "comment": comment,
         "counterArgument": counter_argument,
         **_resolve_origin_fields(origin, subagent_conv_id),
     }
-    res = api_post("proposal/vote", payload, conv_id)
-    report_result(f"Proposal vote [{voter}: {stance} ({confidence}%)]", res)
-    return res
+    return report_result(f"Proposal vote [{voter}: {stance} ({confidence}%)]", api_post("proposal/vote", payload, conv_id))
 
 
 def halt_task(reason: str, conv_id: str = None):
@@ -649,8 +521,98 @@ def halt_task(reason: str, conv_id: str = None):
     return post_message("MAIN", "TEAM-MANAGER", "مدیر تیم", "team-manager", f"[توقف نشست]: {reason}", conv_id=conv_id, is_review=False)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="ThinkTank v3.0 Swarm-Style Bridge CLI")
+def cmd_status(conv_id: str = None, workspace_uri: str = None, as_json: bool = False) -> dict:
+    params = {}
+    if conv_id and conv_id != "default":
+        params["convId"] = conv_id
+    if workspace_uri:
+        params["workspaceUri"] = workspace_uri
+    qs = f"?{urllib.parse.urlencode(params)}" if params else ""
+    try:
+        res = bridge_transport._request(f"{bridge_transport.API_BASE}/status{qs}", timeout=4.0)
+    except Exception as exc:
+        res = {"status": "offline", "error": str(exc)}
+    if as_json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    else:
+        tt = res.get("thinkTank") or {}
+        seq = (res.get("sync") or {}).get("seq")
+        print(
+            f"[ThinkTank] convId={res.get('convId')} status={tt.get('status', res.get('status'))} "
+            f"stage={res.get('pipelineStage')} round={tt.get('round')}/{tt.get('maxRounds')} "
+            f"findings={len(res.get('findings') or [])} subtasks={len(res.get('subtasks') or [])} seq={seq}"
+        )
+    return res
+
+
+def cmd_doctor(home_override: str = None) -> dict:
+    home_dir = Path(home_override).expanduser() if home_override else bridge_transport.CONFIG_DIR
+    health = {}
+    backend_ok = False
+    try:
+        health = bridge_transport._request(f"{bridge_transport.API_BASE}/health", timeout=2.0)
+        backend_ok = bool(health.get("ok") and health.get("syncMode") == "durable-websocket")
+    except Exception as exc:
+        health = {"ok": False, "error": str(exc)}
+
+    sync_db = home_dir / "think_tank_sync.sqlite3"
+    wal_db = Path(f"{sync_db}-wal")
+    hooks_file = home_dir / "hooks.json"
+    sess_file = home_dir / "active_antigravity_session.json"
+    orphan_tmps = list(home_dir.glob("active_antigravity_session*.tmp")) if home_dir.is_dir() else []
+
+    hooks_ok = False
+    if hooks_file.is_file():
+        try:
+            hooks_ok = "thinktank-live-sync" in json.loads(hooks_file.read_text(encoding="utf-8-sig"))
+        except Exception:
+            hooks_ok = False
+
+    report = {
+        "ok": backend_ok and hooks_ok and len(orphan_tmps) == 0,
+        "apiBase": bridge_transport.API_BASE,
+        "backend": health,
+        "outboxQueueCount": bridge_transport.outbox_queue_count(),
+        "configDir": str(home_dir),
+        "syncDbExists": sync_db.is_file(),
+        "syncDbBytes": sync_db.stat().st_size if sync_db.is_file() else 0,
+        "syncWalBytes": wal_db.stat().st_size if wal_db.is_file() else 0,
+        "hooksConfigured": hooks_ok,
+        "sessionFileExists": sess_file.is_file(),
+        "orphanedTmpFiles": len(orphan_tmps),
+    }
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return report
+
+
+def cmd_prune_db(db_path_arg: str = None, keep: int = 20, no_vacuum: bool = False, force: bool = False) -> dict:
+    db_path = Path(db_path_arg).expanduser() if db_path_arg else (bridge_transport.CONFIG_DIR / "think_tank_sync.sqlite3")
+    if not db_path.is_file():
+        out = {"ok": False, "error": f"Database not found: {db_path}"}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return out
+    if not db_path_arg and not force and bridge_transport._health_check(timeout=1.0):
+        out = {"ok": False, "error": "Backend is running; stop backend first or pass --force/--db."}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return out
+
+    backend_dir = str(PLUGIN_ROOT / "backend")
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from store import SyncEventStore  # noqa: E402
+
+    store = SyncEventStore(str(db_path))
+    try:
+        stats = store.prune_bloat(telemetry_keep=keep, vacuum=not no_vacuum)
+    finally:
+        store.close()
+    out = {"ok": True, "dbPath": str(db_path), **stats}
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="ThinkTank v4.0 Case Ledger Bridge CLI")
     default_conv_id = os.environ.get("THINKTANK_CONVERSATION_ID") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
     parser.add_argument("--conv-id", default=default_conv_id, help="Explicit Antigravity conversation ID")
     parser.add_argument("--origin", choices=["subagent", "main-proxy", "user"], default=None, help="Event origin provenance")
@@ -666,8 +628,7 @@ def main():
 
     def add_request_type_option(subparser):
         subparser.add_argument(
-            "--request-type",
-            dest="request_type",
+            "--request-type", dest="request_type",
             help="REWRITE, REFERRAL, QUESTION, INTERROGATION, DEFECT_RETURN, QA_REPORT, PEER_SYNC, CRITIQUE, DECISION, MESSAGE",
         )
 
@@ -703,16 +664,16 @@ def main():
     p_msg.add_argument("--code", default="TEAM-MANAGER")
     p_msg.add_argument("--name", "--sender", "--sender-name", dest="name", default="مدیر تیم")
     p_msg.add_argument("--role", "--sender-role", dest="role", default="team-manager")
-    p_msg.add_argument("--to", "--recipient", dest="recipient", help="Recipient subagent ID or name")
+    p_msg.add_argument("--to", "--recipient", dest="recipient")
     p_msg.add_argument("--recipient-code")
     p_msg.add_argument("--recipient-name")
     p_msg.add_argument("--recipient-role")
-    p_msg.add_argument("--thoughts", help="Internal reasoning")
-    p_msg.add_argument("--critique", help="Critical challenge or flaw analysis")
-    p_msg.add_argument("--question", help="Question / interrogation prompt")
-    p_msg.add_argument("--report", help="Full verification or technical report")
-    p_msg.add_argument("--action-type", dest="action_type", help="MESSAGE, INTERROGATE, PEER_SYNC, QA_DISPATCH, QA_REPORT, DELEGATE")
-    p_msg.add_argument("--request-type", dest="request_type", help="REWRITE, REFERRAL, QUESTION, INTERROGATION, DEFECT_RETURN, QA_REPORT, PEER_SYNC, CRITIQUE, DECISION, MESSAGE")
+    p_msg.add_argument("--thoughts")
+    p_msg.add_argument("--critique")
+    p_msg.add_argument("--question")
+    p_msg.add_argument("--report")
+    p_msg.add_argument("--action-type", dest="action_type")
+    add_request_type_option(p_msg)
     p_msg.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"])
     p_msg.add_argument("--content", "--message", dest="content", required=True)
     p_msg.add_argument("--is-btw", action="store_true")
@@ -740,7 +701,7 @@ def main():
     p_coll.add_argument("--from", "--from-agent", dest="from_agent", required=True)
     p_coll.add_argument("--to", "--to-agent", dest="to_agent", required=True)
     p_coll.add_argument("--action", default="PEER_SYNC", choices=["PEER_SYNC", "INTERROGATE", "INTERROGATE_REPLY", "RETURN_DEFECT", "WORKER_FIX", "REVIEW_QUERY", "QA_DISPATCH", "QA_REPORT", "CRITIQUE", "DELEGATE", "APPROVE", "MESSAGE"])
-    p_coll.add_argument("--request-type", dest="request_type", help="REWRITE, REFERRAL, QUESTION, INTERROGATION, DEFECT_RETURN, QA_REPORT, PEER_SYNC, CRITIQUE, DECISION, MESSAGE")
+    add_request_type_option(p_coll)
     p_coll.add_argument("--channel", choices=["MAIN", "SUBAGENTS", "INTERROGATION", "QA", "SYNC", "COUNCIL"])
     p_coll.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"])
     p_coll.add_argument("--label", "--topic", dest="label", default="همکاری و مباحثه فعال")
@@ -755,8 +716,8 @@ def main():
     add_origin_options(p_coll)
 
     p_int = subparsers.add_parser("interrogate")
-    p_int.add_argument("--from", "--from-agent", dest="from_agent", required=True, help="Supervisor ID (team-manager, council-critic, code-reviewer)")
-    p_int.add_argument("--to", "--to-agent", dest="to_agent", required=True, help="Worker ID being interrogated")
+    p_int.add_argument("--from", "--from-agent", dest="from_agent", required=True)
+    p_int.add_argument("--to", "--to-agent", dest="to_agent", required=True)
     p_int.add_argument("--question", required=True)
     p_int.add_argument("--severity", default="HIGH", choices=["CRITICAL", "HIGH", "MEDIUM"])
     p_int.add_argument("--critique")
@@ -766,7 +727,7 @@ def main():
 
     p_ret = subparsers.add_parser("return-defect")
     p_ret.add_argument("--from", "--from-agent", dest="from_agent", default="council-critic")
-    p_ret.add_argument("--to", "--to-agent", dest="to_agent", required=True, help="Responsible worker ID")
+    p_ret.add_argument("--to", "--to-agent", dest="to_agent", required=True)
     p_ret.add_argument("--bug", "--question", dest="bug", required=True)
     p_ret.add_argument("--severity", default="HIGH", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"])
     p_ret.add_argument("--critique")
@@ -778,7 +739,7 @@ def main():
     add_origin_options(p_ret)
 
     p_fix = subparsers.add_parser("worker-fix")
-    p_fix.add_argument("--from", "--from-agent", dest="from_agent", required=True, help="Worker ID submitting fix")
+    p_fix.add_argument("--from", "--from-agent", dest="from_agent", required=True)
     p_fix.add_argument("--to", "--to-agent", dest="to_agent", default="code-reviewer")
     p_fix.add_argument("--fix", "--summary", dest="fix", required=True)
     p_fix.add_argument("--files")
@@ -789,11 +750,12 @@ def main():
 
     p_rq = subparsers.add_parser("review-query")
     p_rq.add_argument("--from", "--from-agent", dest="from_agent", default="code-reviewer")
-    p_rq.add_argument("--to", "--to-agent", dest="to_agent", required=True, help="Worker or council-critic ID")
+    p_rq.add_argument("--to", "--to-agent", dest="to_agent", required=True)
     p_rq.add_argument("--question", "--summary", dest="question", required=True)
     p_rq.add_argument("--finding", dest="finding_id")
     p_rq.add_argument("--result")
     p_rq.add_argument("--severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"])
+    p_rq.add_argument("--return-to-fixing", action="store_true")
     add_request_type_option(p_rq)
     add_conv_id_option(p_rq)
     add_origin_options(p_rq)
@@ -923,8 +885,23 @@ def main():
     p_fact.add_argument("--reason", default=None)
     add_conv_id_option(p_fact)
 
+    p_status = subparsers.add_parser("status")
+    p_status.add_argument("--workspace", "--workspace-uri", dest="workspace_uri", default=None)
+    p_status.add_argument("--json", action="store_true", dest="as_json")
+    add_conv_id_option(p_status)
+
+    p_doctor = subparsers.add_parser("doctor")
+    p_doctor.add_argument("--home", default=None)
+
+    p_prune = subparsers.add_parser("prune-db")
+    p_prune.add_argument("--db", default=None)
+    p_prune.add_argument("--keep", type=int, default=20)
+    p_prune.add_argument("--no-vacuum", action="store_true")
+    p_prune.add_argument("--force", action="store_true")
+
     args = parser.parse_args()
-    if args.command and (not args.conv_id or args.conv_id == "default"):
+    readonly_or_diag = {"status", "doctor", "prune-db"}
+    if args.command and args.command not in readonly_or_diag and (not args.conv_id or args.conv_id == "default"):
         parser.error("an explicit Antigravity conversation ID is required; pass --conv-id or set ANTIGRAVITY_CONVERSATION_ID")
 
     res = None
@@ -952,10 +929,9 @@ def main():
             action_type=getattr(args, "action_type", None),
             request_type=getattr(args, "request_type", None),
             severity=getattr(args, "severity", None),
-            origin=args.origin,
-            subagent_conv_id=args.subagent_conv_id,
+            origin=args.origin, subagent_conv_id=args.subagent_conv_id,
         )
-    elif args.command == "update-agent":
+    elif args.command in ("update-agent", "agent-state"):
         res = update_agent(
             args.id, args.task, args.tool, args.thought, args.demo, args.status,
             args.latency, conv_id=args.conv_id, name=args.name, role=args.role,
@@ -965,14 +941,10 @@ def main():
         res = collaborate(
             args.from_agent, args.to_agent, args.label, args.message, conv_id=args.conv_id,
             action=args.action, request_type=getattr(args, "request_type", None), channel=args.channel, severity=args.severity,
-            thoughts=getattr(args, "thoughts", None),
-            critique=getattr(args, "critique", None),
-            question=getattr(args, "question", None),
-            report=getattr(args, "report", None),
-            result=getattr(args, "result", None),
-            finding_id=getattr(args, "finding_id", None),
-            origin=args.origin,
-            subagent_conv_id=args.subagent_conv_id,
+            thoughts=getattr(args, "thoughts", None), critique=getattr(args, "critique", None),
+            question=getattr(args, "question", None), report=getattr(args, "report", None),
+            result=getattr(args, "result", None), finding_id=getattr(args, "finding_id", None),
+            origin=args.origin, subagent_conv_id=args.subagent_conv_id,
         )
     elif args.command == "interrogate":
         res = interrogate(
@@ -998,7 +970,7 @@ def main():
         res = review_query(
             args.from_agent, args.to_agent, args.question,
             conv_id=args.conv_id, finding_id=args.finding_id,
-            result=args.result, severity=args.severity,
+            result=args.result, severity=args.severity, return_to_fixing=args.return_to_fixing,
             request_type=getattr(args, "request_type", None),
             origin=args.origin, subagent_conv_id=args.subagent_conv_id,
         )
@@ -1021,8 +993,7 @@ def main():
             conv_id=args.conv_id, finding_id=args.finding_id,
             evidence_command=args.evidence_command, exit_code=args.exit_code,
             evidence_excerpt=args.evidence_excerpt, runner=args.runner,
-            runner_reason=args.runner_reason,
-            request_type=getattr(args, "request_type", None),
+            runner_reason=args.runner_reason, request_type=getattr(args, "request_type", None),
             origin=args.origin, subagent_conv_id=args.subagent_conv_id,
         )
     elif args.command == "log-tool":
@@ -1066,10 +1037,19 @@ def main():
             origin=args.origin, subagent_conv_id=args.subagent_conv_id,
         )
     elif args.command == "finding-action":
-        res = finding_action(
-            finding_id=args.finding_id, action=args.action,
-            reason=args.reason, conv_id=args.conv_id,
-        )
+        res = finding_action(finding_id=args.finding_id, action=args.action, reason=args.reason, conv_id=args.conv_id)
+    elif args.command == "status":
+        res = cmd_status(conv_id=args.conv_id, workspace_uri=args.workspace_uri, as_json=args.as_json)
+        if res.get("status") == "offline":
+            sys.exit(1)
+    elif args.command == "doctor":
+        res = cmd_doctor(home_override=args.home)
+        if not res.get("ok"):
+            sys.exit(1)
+    elif args.command == "prune-db":
+        res = cmd_prune_db(db_path_arg=args.db, keep=args.keep, no_vacuum=args.no_vacuum, force=args.force)
+        if not res.get("ok"):
+            sys.exit(1)
     else:
         parser.print_help()
     if isinstance(res, dict) and res.get("status") == "error":

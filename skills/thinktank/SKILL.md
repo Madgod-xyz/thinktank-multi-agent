@@ -1,17 +1,17 @@
 ---
 name: thinktank
-description: Launch an isolated ThinkTank v3 7+1 multi-agent Case Ledger session (/ThinkTank or /thinktank) with real subagent execution, WBS file locks, red-team critique, code review, and evidence-backed QA.
+description: Launch an isolated ThinkTank v4.0 7+1 multi-agent Case Ledger session (/ThinkTank or /thinktank) with real subagent execution, WBS file locks, red-team critique, code review, and evidence-backed QA.
 argument-hint: "[task or directive]"
 ---
 
-# ThinkTank v3 Live Session Launcher (`/ThinkTank` & `/thinktank`)
+# ThinkTank v4.0 Live Session Launcher (`/ThinkTank` & `/thinktank`)
 
-Execute a clean, isolated ThinkTank v3 7+1 multi-agent session inside the active conversation without bleeding state from earlier runs. Both `/thinktank` and `/ThinkTank` activate through this bundled skill (`skills/thinktank/SKILL.md`) and `commands/thinktank.toml`.
+Execute a clean, isolated ThinkTank v4.0 7+1 multi-agent session inside the active conversation without bleeding state from earlier runs. Both `/thinktank` and `/ThinkTank` activate through this bundled skill (`skills/thinktank/SKILL.md`) and `commands/thinktank.toml`.
 
 ## Execution Protocol
 
 1. **Verify Backend & Bridge Runtime:**
-   - Ensure the ThinkTank backend is reachable (`python tools/install_plugin.py --check --start-backend` from the plugin directory, or invoke the installed `~/.gemini/config/tools/thinktank_bridge.py`).
+   - Ensure the ThinkTank backend is reachable (`python tools/install_plugin.py --check --start-backend` from the plugin directory, or invoke `thinktank_bridge.py doctor` / `thinktank_bridge.py status`).
 2. **Start an Isolated Run (`--new-run`):**
    - Log session routing with `triage --chosen thinktank --tt-reasons "..." --solo-reasons "..."`.
    - Start a fresh isolated run in the current conversation using `set-task --new-run --project "<Project>" --directive "<Directive>" --round 1 --progress 10` so any prior closed or active work archives cleanly (`--run-N`) with zero data bleed.

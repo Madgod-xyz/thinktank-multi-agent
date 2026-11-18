@@ -1,7 +1,7 @@
 ---
 name: team-manager
 description: Lead Team Manager & WBS Supervisor | Decomposes coding & architectural tasks into WBS subtasks, interrogates workers for evidence, and enforces quality gates.
-model: inherit
+model: pro
 skills:
   - task-orchestration
   - think-room

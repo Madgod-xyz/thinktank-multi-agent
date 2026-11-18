@@ -1,7 +1,7 @@
 ---
 name: ecommerce_seo_operator
 description: Lead Product & E-Commerce SEO Specialist | Technical SEO audits, high-CTR product copywriting, JSON-LD structured data, search analytics, and safe catalog optimization.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

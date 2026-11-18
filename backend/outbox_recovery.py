@@ -13,11 +13,9 @@ async def outbox_recovery_loop(
     max_events: int = 20,
     timeout: float = 0.35,
 ) -> None:
-    """Drain a bounded batch periodically without blocking the API event loop."""
     while True:
         try:
             await asyncio.to_thread(flush, max_events=max_events, timeout=timeout)
         except Exception:
-            # A later iteration retries the durable queue after transient errors.
             pass
         await asyncio.sleep(interval_seconds)

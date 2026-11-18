@@ -1,9 +1,9 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "team-orchestration-director",
-  "displayName": "ThinkTank (7+1 Multi-Agent Case Ledger)",
-  "version": "3.0.0",
-  "description": "Stateful 7+1 multi-agent Case Ledger plugin for Antigravity: hierarchical supervisors, evidence-gated QA, single-owner file locks, isolated multi-run sessions (--new-run), real subagent session routing, and a live bilingual Sidecar UI.",
+  "displayName": "ThinkTank v4.0 (7+1 Multi-Agent Case Ledger)",
+  "version": "4.0.0",
+  "description": "Stateful 7+1 multi-agent Case Ledger plugin for Antigravity: SQLite WAL single source of truth, single-commit CASE_EVENT WebSocket sync, hierarchical supervisors, evidence-gated QA, single-owner file locks, isolated multi-run sessions (--new-run), and a 4-board Hallmark Studio Sidecar UI.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "/ThinkTank Design and implement a new REST endpoint with contract tests and UI integration",

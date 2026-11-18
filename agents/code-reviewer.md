@@ -1,7 +1,7 @@
 ---
 name: code-reviewer
 description: Lead Line-by-Line Code Reviewer & QA Commander | Audits every diff line by line, commands subordinate qa-reviewer for live testing, and interrogates workers on defects.
-model: inherit
+model: pro
 skills:
   - quality-gate
   - think-room

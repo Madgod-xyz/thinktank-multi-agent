@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Think Tank Antigravity lifecycle hooks without replacing other hooks."""
+"""Install the ThinkTank v4.0 Antigravity lifecycle hooks without replacing other hooks."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-
 
 HOOK_NAME = "thinktank-live-sync"
 

@@ -1,7 +1,7 @@
 ---
 name: council-critic
 description: Lead Red-Team Council Critic | Exclusively uncovers flaws, regressions, security holes, architectural gaps, and AI slop across plans and code.
-model: inherit
+model: pro
 skills:
   - think-room
   - task-orchestration
